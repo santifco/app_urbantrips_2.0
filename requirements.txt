@@ -4,6 +4,5 @@ openpyxl
 geopandas
 shapely
 pydeck
-fiona
+pyogrio
 pyproj
-rtree
