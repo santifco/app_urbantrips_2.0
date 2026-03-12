@@ -30,6 +30,8 @@ HEX_SIZE_OPTIONS = {
     "150 m": 150,
     "250 m": 250,
     "400 m": 400,
+    "1000 m": 1000,
+    "3000 m": 3000,
 }
 
 TIME_BLOCKS = {
@@ -42,16 +44,9 @@ TIME_BLOCKS = {
     "Noche (20-23)": (20, 24),
 }
 
-import tempfile
-import geopandas as gpd
-
 @st.cache_data(show_spinner=False)
 def load_geojson(uploaded_geojson_bytes: bytes) -> gpd.GeoDataFrame:
-    with tempfile.NamedTemporaryFile(suffix=".geojson", delete=False) as tmp:
-        tmp.write(uploaded_geojson_bytes)
-        tmp_path = tmp.name
-
-    gdf = gpd.read_file(tmp_path, engine="pyogrio")
+    gdf = gpd.read_file(io.BytesIO(uploaded_geojson_bytes))
     return gdf
 
 
@@ -760,5 +755,5 @@ with st.expander("Criterio metodológico usado", expanded=False):
   - mayor a 1: la línea capta más demanda que la oferta que pone
   - menor a 1: pone más oferta de la que capta
         """
-
     )
+
