@@ -427,6 +427,18 @@ def to_download_excel(points_df: pd.DataFrame, compare_df: Optional[pd.DataFrame
     buffer.seek(0)
     return buffer.read()
 
+def build_hourly_evolution_total(df_filtered: pd.DataFrame, selected_lines: list[int]) -> pd.DataFrame:
+    sub = df_filtered[df_filtered["NUM_LINEA"].isin(selected_lines)].copy()
+
+    out = (
+        sub.groupby(["HORA", "NUM_LINEA"], as_index=False)
+        .agg(
+            trx=("CANT_TRAX", "sum"),
+            internos=("INTERNO", pd.Series.nunique),
+        )
+    )
+
+    return out.sort_values(["HORA", "NUM_LINEA"])
 
 # =========================
 # UI
@@ -552,6 +564,8 @@ with st.spinner("Generando hexágonos y métricas..."):
         min_trx_hex=int(min_trx_hex),
         min_lines_competing=int(min_lines_competing),
     ).merge(hex_polygons, on="hex_id", how="left")
+
+evol_total = build_hourly_evolution_total(df_f, selected_lines)
 
 # =========================
 # KPIs
@@ -725,6 +739,15 @@ if not points_control.empty:
         else:
             chart_df = evol_hex.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
             st.line_chart(chart_df, use_container_width=True)
+
+
+st.subheader("Evolución horaria total")
+
+if evol_total.empty:
+    st.info("No hay datos para la evolución horaria total.")
+else:
+    chart_total = evol_total.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
+    st.line_chart(chart_total, use_container_width=True)
 
     download_bytes = to_download_excel(display_df, comp_hex)
     st.download_button(
