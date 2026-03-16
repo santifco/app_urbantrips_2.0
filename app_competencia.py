@@ -861,7 +861,7 @@ with tab_competencia:
             chart_total = evol_total.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
             st.line_chart(chart_total, use_container_width=True)
 
-            trx_total_global = int(df_f["CANT_TRAX"].sum())
+            trx_total_global = int(df_f[df_f["NUM_LINEA"] == my_line]["CANT_TRAX"].sum())
             st.metric(
                 "Transacciones totales del filtro actual",
                 f"{trx_total_global:,}".replace(",", ".")
@@ -1074,6 +1074,7 @@ with st.expander("Criterio metodológico usado", expanded=False):
   - menor a 1: pone más oferta de la que capta
         """
     )
+
 
 
 
