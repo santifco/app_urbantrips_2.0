@@ -812,6 +812,7 @@ with tab_competencia:
 
     display_df = pd.DataFrame(columns=show_cols)
     comp_hex = pd.DataFrame()
+    
 
     if points_control.empty:
         st.info("No hay puntos de control para mostrar.")
@@ -852,13 +853,19 @@ with tab_competencia:
                 chart_df = evol_hex.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
                 st.line_chart(chart_df, use_container_width=True)
 
-    st.subheader("Evolución horaria total")
+        st.subheader("Evolución horaria total")
 
-    if evol_total.empty:
-        st.info("No hay datos para la evolución horaria total.")
-    else:
-        chart_total = evol_total.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
-        st.line_chart(chart_total, use_container_width=True)
+        if evol_total.empty:
+            st.info("No hay datos para la evolución horaria total.")
+        else:
+            chart_total = evol_total.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
+            st.line_chart(chart_total, use_container_width=True)
+
+            trx_total_global = int(df_f["CANT_TRAX"].sum())
+            st.metric(
+                "Transacciones totales del filtro actual",
+                f"{trx_total_global:,}".replace(",", ".")
+            )
 
     download_bytes = to_download_excel(display_df, comp_hex)
     st.download_button(
@@ -1067,5 +1074,6 @@ with st.expander("Criterio metodológico usado", expanded=False):
   - menor a 1: pone más oferta de la que capta
         """
     )
+
 
 
