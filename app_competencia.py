@@ -714,7 +714,6 @@ with tab_competencia:
         "Mostrar mapa de calor",
         value=False
     )
-
     if df_f.empty:
         st.warning("No hay datos para los filtros elegidos.")
         st.stop()
@@ -730,14 +729,32 @@ with tab_competencia:
             min_lines_competing=int(min_lines_competing),
         ).merge(hex_polygons, on="hex_id", how="left")
 
-    trx_total_filtro = points_control["trx_total_hex"].sum() if not points_control.empty else 0
+    map_points_control = points_control.copy()
+
+    exclude_hex = "NINGUNO"
+    if not map_points_control.empty:
+        exclude_hex = st.sidebar.selectbox(
+            "Excluir hexágono del mapa de calor",
+            options=["NINGUNO"] + sorted(map_points_control["hex_id"].astype(str).unique().tolist()),
+            index=0,
+            key="exclude_hex_heatmap"
+        )
+
+        if exclude_hex != "NINGUNO":
+            map_points_control = map_points_control[
+                map_points_control["hex_id"] != exclude_hex
+            ].copy()
+
+    trx_total_filtro = map_points_control["trx_total_hex"].sum() if not map_points_control.empty else 0
 
     if trx_total_filtro > 0:
-        points_control["pct_trx_hex"] = points_control["trx_total_hex"] / trx_total_filtro
+        map_points_control["pct_trx_hex"] = map_points_control["trx_total_hex"] / trx_total_filtro
     else:
-        points_control["pct_trx_hex"] = 0.0
+        map_points_control["pct_trx_hex"] = 0.0
 
-    points_control["label_pct"] = (points_control["pct_trx_hex"] * 100).round(1).astype(str) + "%"
+    map_points_control["label_pct"] = (
+        (map_points_control["pct_trx_hex"] * 100).round(1).astype(str) + "%"
+    )
 
     evol_total = build_hourly_evolution_total(df_f, selected_lines)
 
@@ -749,10 +766,13 @@ with tab_competencia:
 
     st.subheader("Mapa de puntos de control")
 
+    if exclude_hex and exclude_hex != "NINGUNO":
+        st.info(f"Mapa de calor recalculado excluyendo el hexágono: {exclude_hex}")
+
     if points_control.empty:
         st.warning("No se encontraron hexágonos competitivos con los umbrales elegidos.")
     else:
-        map_df = points_control.copy()
+        map_df = map_points_control.copy()
 
         map_df["tooltip"] = (
             "Hex: " + map_df["hex_id"].astype(str)
