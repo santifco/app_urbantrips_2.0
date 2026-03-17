@@ -226,15 +226,14 @@ def create_hexagon(center_x: float, center_y: float, size_m: float) -> Polygon:
     ]
     return Polygon(points)
 
+
 def compute_headways(df_hex, selected_lines):
-    
     df = df_hex[df_hex["NUM_LINEA"].isin(selected_lines)].copy()
     df = df.sort_values("DATE_TIME")
 
     results = []
 
     for (linea, sentido, hex_id), group in df.groupby(["NUM_LINEA", "SENTIDO", "hex_id"]):
-
         times = group["DATE_TIME"].sort_values()
 
         if len(times) < 2:
@@ -524,6 +523,7 @@ def build_vehicle_points_df(trace_df: pd.DataFrame) -> pd.DataFrame:
 
     return out[["LONGITUDE", "LATITUDE", "orden", "tooltip"]].copy()
 
+
 def build_vehicle_hourly(trace_df: pd.DataFrame) -> pd.DataFrame:
     if trace_df.empty:
         return pd.DataFrame(columns=["HORA", "trx", "registros"])
@@ -547,6 +547,34 @@ def to_download_excel(points_df: pd.DataFrame, compare_df: Optional[pd.DataFrame
             compare_df.to_excel(writer, sheet_name="Comparacion_hex", index=False)
     buffer.seek(0)
     return buffer.read()
+
+
+def color_by_index(x):
+    if pd.isna(x):
+        return [160, 160, 160, 120]
+    if x < 0.8:
+        return [220, 70, 70, 160]
+    if x <= 1.2:
+        return [150, 150, 150, 140]
+    return [50, 170, 90, 160]
+
+
+def color_by_heat_pct(p):
+    if pd.isna(p):
+        return [200, 200, 200, 120]
+
+    if p <= 0:
+        return [245, 245, 245, 80]
+    elif p < 0.01:
+        return [255, 245, 204, 120]
+    elif p < 0.02:
+        return [255, 230, 153, 140]
+    elif p < 0.05:
+        return [255, 204, 102, 160]
+    elif p < 0.10:
+        return [255, 153, 51, 180]
+    else:
+        return [230, 85, 13, 200]
 
 
 # =========================
@@ -633,6 +661,7 @@ tab_competencia, tab_recorrido, tab_frecuencia = st.tabs([
     "Recorrido de un colectivo",
     "Frecuencia observada"
 ])
+
 # =========================
 # SOLAPA 1: COMPETENCIA
 # =========================
@@ -681,6 +710,11 @@ with tab_competencia:
         value=False
     )
 
+    show_heatmap = st.sidebar.checkbox(
+        "Mostrar mapa de calor",
+        value=False
+    )
+
     if df_f.empty:
         st.warning("No hay datos para los filtros elegidos.")
         st.stop()
@@ -695,6 +729,15 @@ with tab_competencia:
             min_trx_hex=int(min_trx_hex),
             min_lines_competing=int(min_lines_competing),
         ).merge(hex_polygons, on="hex_id", how="left")
+
+    trx_total_filtro = points_control["trx_total_hex"].sum() if not points_control.empty else 0
+
+    if trx_total_filtro > 0:
+        points_control["pct_trx_hex"] = points_control["trx_total_hex"] / trx_total_filtro
+    else:
+        points_control["pct_trx_hex"] = 0.0
+
+    points_control["label_pct"] = (points_control["pct_trx_hex"] * 100).round(1).astype(str) + "%"
 
     evol_total = build_hourly_evolution_total(df_f, selected_lines)
 
@@ -714,23 +757,17 @@ with tab_competencia:
         map_df["tooltip"] = (
             "Hex: " + map_df["hex_id"].astype(str)
             + "\nTrx total: " + map_df["trx_total_hex"].round(0).astype(int).astype(str)
+            + "\n% del total: " + (map_df["pct_trx_hex"] * 100).round(2).astype(str) + "%"
             + "\nLíneas presentes: " + map_df["lineas_presentes"].astype(int).astype(str)
             + "\nShare demanda mi línea: " + (map_df["share_demanda"] * 100).round(1).astype(str) + "%"
             + "\nShare oferta mi línea: " + (map_df["share_oferta"] * 100).round(1).astype(str) + "%"
             + "\nÍndice captación: " + map_df["indice_captacion"].round(2).astype(str)
         )
 
-        def color_by_index(x):
-            if pd.isna(x):
-                return [160, 160, 160, 120]
-            elif x < 0.8:
-                return [220, 70, 70, 160]
-            elif x <= 1.2:
-                return [150, 150, 150, 140]
-            else:
-                return [50, 170, 90, 160]
-
-        map_df["fill_color"] = map_df["indice_captacion"].apply(color_by_index)
+        if show_heatmap:
+            map_df["fill_color"] = map_df["pct_trx_hex"].apply(color_by_heat_pct)
+        else:
+            map_df["fill_color"] = map_df["indice_captacion"].apply(color_by_index)
 
         if map_df["trx_total_hex"].max() > 0:
             map_df["circle_radius"] = (
@@ -754,6 +791,21 @@ with tab_competencia:
             pickable=True,
             auto_highlight=True,
         )
+
+        text_layer = None
+        if show_heatmap:
+            text_layer = pdk.Layer(
+                "TextLayer",
+                data=map_df,
+                get_position="[lon, lat]",
+                get_text="label_pct",
+                get_size=14,
+                get_color=[40, 40, 40, 220],
+                get_angle=0,
+                get_text_anchor="'middle'",
+                get_alignment_baseline="'center'",
+                pickable=False,
+            )
 
         view_state = pdk.ViewState(
             latitude=float(center_lat),
@@ -807,6 +859,9 @@ with tab_competencia:
         if routes_layer is not None:
             layers.append(routes_layer)
 
+        if text_layer is not None:
+            layers.append(text_layer)
+
         deck = pdk.Deck(
             layers=layers,
             initial_view_state=view_state,
@@ -816,14 +871,24 @@ with tab_competencia:
 
         st.pydeck_chart(deck, use_container_width=True)
 
-        st.markdown(
-            """
-            **Interpretación de colores**
-            - 🔴 Rojo: índice de captación < 0.8
-            - ⚪ Gris: índice de captación entre 0.8 y 1.2
-            - 🟢 Verde: índice de captación > 1.2
-            """
-        )
+        if show_heatmap:
+            st.markdown(
+                """
+                **Mapa de calor por participación en transacciones**
+                - más claro: menor % de trx del total
+                - más oscuro: mayor % de trx del total
+                - la etiqueta indica el **% del total** que representa cada hexágono
+                """
+            )
+        else:
+            st.markdown(
+                """
+                **Interpretación de colores**
+                - 🔴 Rojo: índice de captación < 0.8
+                - ⚪ Gris: índice de captación entre 0.8 y 1.2
+                - 🟢 Verde: índice de captación > 1.2
+                """
+            )
 
         if show_trx_circles:
             st.markdown("🔵 El tamaño del círculo representa las transacciones totales del hexágono.")
@@ -833,6 +898,7 @@ with tab_competencia:
     show_cols = [
         "hex_id",
         "trx_total_hex",
+        "pct_trx_hex",
         "lineas_presentes",
         "trx_linea",
         "internos_linea",
@@ -845,12 +911,12 @@ with tab_competencia:
 
     display_df = pd.DataFrame(columns=show_cols)
     comp_hex = pd.DataFrame()
-    
 
     if points_control.empty:
         st.info("No hay puntos de control para mostrar.")
     else:
         display_df = points_control[show_cols].copy()
+        display_df["pct_trx_hex"] = (display_df["pct_trx_hex"] * 100).round(2)
         display_df["share_demanda"] = (display_df["share_demanda"] * 100).round(2)
         display_df["share_oferta"] = (display_df["share_oferta"] * 100).round(2)
         display_df["trx_por_interno"] = display_df["trx_por_interno"].round(2)
@@ -974,12 +1040,8 @@ with tab_recorrido:
             vehicle_points_df = build_vehicle_points_animation_df(trace_df, step_idx)
             current_position_df = build_current_position_df(trace_df, step_idx)
 
-            center_lat = trace_df["LATITUDE"].mean()
-            center_lon = trace_df["LONGITUDE"].mean()
-
             layers_rec = []
 
-            # recorrido de referencia del geojson
             if routes_gdf is not None:
                 routes_ref_df = build_routes_layer_df(
                     routes_gdf=routes_gdf,
@@ -999,7 +1061,6 @@ with tab_recorrido:
                     )
                     layers_rec.append(route_ref_layer)
 
-            # puntos ya recorridos hasta el instante actual
             history_layer = pdk.Layer(
                 "ScatterplotLayer",
                 data=vehicle_points_df,
@@ -1013,7 +1074,6 @@ with tab_recorrido:
                 pickable=True,
             )
 
-            # posición actual destacada
             current_layer = pdk.Layer(
                 "ScatterplotLayer",
                 data=current_position_df,
@@ -1113,7 +1173,6 @@ with st.expander("Criterio metodológico usado", expanded=False):
 # =========================
 
 with tab_frecuencia:
-
     st.subheader("Frecuencia observada por línea")
 
     if df_f.empty:
@@ -1121,7 +1180,6 @@ with tab_frecuencia:
         st.stop()
 
     with st.spinner("Calculando frecuencia observada..."):
-
         df_hex = assign_points_to_hexes(df_f, hex_size_m)
 
         freq_df = compute_headways(
@@ -1132,7 +1190,6 @@ with tab_frecuencia:
     if freq_df.empty:
         st.info("No hay suficientes observaciones para calcular frecuencia.")
     else:
-
         col1, col2, col3 = st.columns(3)
 
         col1.metric(
@@ -1153,11 +1210,11 @@ with tab_frecuencia:
         st.subheader("Frecuencia por línea")
 
         freq_line = (
-            freq_df.groupby(["linea","sentido"])
+            freq_df.groupby(["linea", "sentido"])
             .agg(
-                headway_median=("headway_median","median"),
-                headway_mean=("headway_mean","mean"),
-                pasos=("pasos_observados","sum")
+                headway_median=("headway_median", "median"),
+                headway_mean=("headway_mean", "mean"),
+                pasos=("pasos_observados", "sum")
             )
             .reset_index()
         )
@@ -1177,7 +1234,6 @@ with tab_frecuencia:
         st.line_chart(chart)
 
         st.subheader("Tabla completa por hexágono")
-
         st.dataframe(freq_df, use_container_width=True)
 
         buffer = io.BytesIO()
