@@ -226,6 +226,38 @@ def create_hexagon(center_x: float, center_y: float, size_m: float) -> Polygon:
     ]
     return Polygon(points)
 
+def compute_headways(df_hex, selected_lines):
+    
+    df = df_hex[df_hex["NUM_LINEA"].isin(selected_lines)].copy()
+    df = df.sort_values("DATE_TIME")
+
+    results = []
+
+    for (linea, sentido, hex_id), group in df.groupby(["NUM_LINEA", "SENTIDO", "hex_id"]):
+
+        times = group["DATE_TIME"].sort_values()
+
+        if len(times) < 2:
+            continue
+
+        diffs = times.diff().dt.total_seconds() / 60
+        diffs = diffs.dropna()
+
+        if len(diffs) == 0:
+            continue
+
+        results.append({
+            "linea": linea,
+            "sentido": sentido,
+            "hex_id": hex_id,
+            "headway_mean": diffs.mean(),
+            "headway_median": diffs.median(),
+            "headway_p90": diffs.quantile(0.9),
+            "pasos_observados": len(times)
+        })
+
+    return pd.DataFrame(results)
+
 
 def build_hex_grid(gdf_3857: gpd.GeoDataFrame, size_m: float) -> gpd.GeoDataFrame:
     minx, miny, maxx, maxy = gdf_3857.total_bounds
@@ -596,9 +628,10 @@ with st.expander("Carga de archivos y configuración inicial", expanded=True):
                 use_container_width=True,
             )
 
-tab_competencia, tab_recorrido = st.tabs([
+tab_competencia, tab_recorrido, tab_frecuencia = st.tabs([
     "Competencia por hexágonos",
-    "Recorrido de un colectivo"
+    "Recorrido de un colectivo",
+    "Frecuencia observada"
 ])
 # =========================
 # SOLAPA 1: COMPETENCIA
@@ -1074,6 +1107,92 @@ with st.expander("Criterio metodológico usado", expanded=False):
   - menor a 1: pone más oferta de la que capta
         """
     )
+
+# =========================
+# SOLAPA 3: FRECUENCIA
+# =========================
+
+with tab_frecuencia:
+
+    st.subheader("Frecuencia observada por línea")
+
+    if df_f.empty:
+        st.warning("No hay datos con los filtros elegidos.")
+        st.stop()
+
+    with st.spinner("Calculando frecuencia observada..."):
+
+        df_hex = assign_points_to_hexes(df_f, hex_size_m)
+
+        freq_df = compute_headways(
+            df_hex=df_hex,
+            selected_lines=selected_lines
+        )
+
+    if freq_df.empty:
+        st.info("No hay suficientes observaciones para calcular frecuencia.")
+    else:
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric(
+            "Líneas analizadas",
+            freq_df["linea"].nunique()
+        )
+
+        col2.metric(
+            "Hexágonos con pasos observados",
+            freq_df["hex_id"].nunique()
+        )
+
+        col3.metric(
+            "Headway mediano general",
+            f"{freq_df['headway_median'].median():.1f} min"
+        )
+
+        st.subheader("Frecuencia por línea")
+
+        freq_line = (
+            freq_df.groupby(["linea","sentido"])
+            .agg(
+                headway_median=("headway_median","median"),
+                headway_mean=("headway_mean","mean"),
+                pasos=("pasos_observados","sum")
+            )
+            .reset_index()
+        )
+
+        st.dataframe(freq_line, use_container_width=True)
+
+        st.subheader("Distribución de headways")
+
+        chart_df = freq_df.copy()
+        chart_df["linea_sentido"] = chart_df["linea"].astype(str) + "_" + chart_df["sentido"]
+
+        chart = chart_df.pivot(
+            columns="linea_sentido",
+            values="headway_median"
+        )
+
+        st.line_chart(chart)
+
+        st.subheader("Tabla completa por hexágono")
+
+        st.dataframe(freq_df, use_container_width=True)
+
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            freq_line.to_excel(writer, sheet_name="Frecuencia_linea", index=False)
+            freq_df.to_excel(writer, sheet_name="Frecuencia_hexagonos", index=False)
+
+        buffer.seek(0)
+
+        st.download_button(
+            "Descargar frecuencia en Excel",
+            data=buffer.read(),
+            file_name="frecuencia_observada.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 
 
