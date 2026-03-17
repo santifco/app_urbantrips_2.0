@@ -729,32 +729,43 @@ with tab_competencia:
             min_lines_competing=int(min_lines_competing),
         ).merge(hex_polygons, on="hex_id", how="left")
 
-    map_points_control = points_control.copy()
+        points_control_base_total = points_control["trx_total_hex"].sum() if not points_control.empty else 0
 
-    exclude_hex = "NINGUNO"
-    if not map_points_control.empty:
-        exclude_hex = st.sidebar.selectbox(
-            "Excluir hexágono del mapa de calor",
-            options=["NINGUNO"] + sorted(map_points_control["hex_id"].astype(str).unique().tolist()),
-            index=0,
-            key="exclude_hex_heatmap"
+        if points_control_base_total > 0:
+            points_control["pct_trx_hex"] = points_control["trx_total_hex"] / points_control_base_total
+        else:
+            points_control["pct_trx_hex"] = 0.0
+
+        points_control["label_pct"] = (
+            (points_control["pct_trx_hex"] * 100).round(1).astype(str) + "%"
         )
 
-        if exclude_hex != "NINGUNO":
-            map_points_control = map_points_control[
-                map_points_control["hex_id"] != exclude_hex
-            ].copy()
+        map_points_control = points_control.copy()
 
-    trx_total_filtro = map_points_control["trx_total_hex"].sum() if not map_points_control.empty else 0
+        exclude_hex = "NINGUNO"
+        if not map_points_control.empty:
+            exclude_hex = st.sidebar.selectbox(
+                "Excluir hexágono del mapa de calor",
+                options=["NINGUNO"] + sorted(map_points_control["hex_id"].astype(str).unique().tolist()),
+                index=0,
+                key="exclude_hex_heatmap"
+            )
 
-    if trx_total_filtro > 0:
-        map_points_control["pct_trx_hex"] = map_points_control["trx_total_hex"] / trx_total_filtro
-    else:
-        map_points_control["pct_trx_hex"] = 0.0
+            if exclude_hex != "NINGUNO":
+                map_points_control = map_points_control[
+                    map_points_control["hex_id"] != exclude_hex
+                ].copy()
 
-    map_points_control["label_pct"] = (
-        (map_points_control["pct_trx_hex"] * 100).round(1).astype(str) + "%"
-    )
+        trx_total_filtro = map_points_control["trx_total_hex"].sum() if not map_points_control.empty else 0
+
+        if trx_total_filtro > 0:
+            map_points_control["pct_trx_hex"] = map_points_control["trx_total_hex"] / trx_total_filtro
+        else:
+            map_points_control["pct_trx_hex"] = 0.0
+
+        map_points_control["label_pct"] = (
+            (map_points_control["pct_trx_hex"] * 100).round(1).astype(str) + "%"
+        )
 
     evol_total = build_hourly_evolution_total(df_f, selected_lines)
 
@@ -1269,7 +1280,5 @@ with tab_frecuencia:
             file_name="frecuencia_observada.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-
-
 
 
