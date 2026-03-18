@@ -1081,17 +1081,17 @@ with tab_competencia:
                 df_fechas["FECHA_LABEL"] = pd.to_datetime(df_fechas["FECHA_ONLY"]).dt.strftime("%d/%m/%Y")
                 # Totales por fecha y línea
                 totales_fecha_linea = (
-                    df_fechas.groupby(["FECHA_ONLY", "NUM_LINEA"], as_index=False)
+                    df_fechas.groupby(["FECHA_LABEL", "NUM_LINEA"], as_index=False)
                     .agg(trx_total=("CANT_TRAX", "sum"))
                 )
 
                 # Total del día para calcular shares
                 total_fecha = (
-                    df_fechas.groupby("FECHA_ONLY", as_index=False)
+                    df_fechas.groupby("FECHA_LABEL", as_index=False)
                     .agg(trx_total_dia=("CANT_TRAX", "sum"))
                 )
 
-                share_fecha_linea = totales_fecha_linea.merge(total_fecha, on="FECHA_ONLY", how="left")
+                share_fecha_linea = totales_fecha_linea.merge(total_fecha, on="FECHA_LABEL", how="left")
                 share_fecha_linea["share_linea"] = np.where(
                     share_fecha_linea["trx_total_dia"] > 0,
                     share_fecha_linea["trx_total"] / share_fecha_linea["trx_total_dia"],
@@ -1101,7 +1101,7 @@ with tab_competencia:
                 # Pivot para gráficos
                 chart_totales = (
                     totales_fecha_linea
-                    .pivot(index="FECHA_ONLY", columns="NUM_LINEA", values="trx_total")
+                    .pivot(index="FECHA_LABEL", columns="NUM_LINEA", values="trx_total")
                     .fillna(0)
                     .sort_index()
                 )
@@ -1109,7 +1109,7 @@ with tab_competencia:
                 chart_share = (
                     share_fecha_linea
                     .assign(share_linea=lambda x: (x["share_linea"] * 100).round(2))  # ← clave
-                    .pivot(index="FECHA_ONLY", columns="NUM_LINEA", values="share_linea")
+                    .pivot(index="FECHA_LABEL", columns="NUM_LINEA", values="share_linea")
                     .fillna(0)
                     .sort_index()
                 )
