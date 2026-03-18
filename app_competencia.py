@@ -1037,98 +1037,194 @@ with tab_competencia:
                 chart_df = evol_hex.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
                 st.line_chart(chart_df, use_container_width=True)
 
+        metric_mode = st.selectbox(
+            "Métrica para visualizar",
+            ["Demanda (transacciones)", "Oferta (internos únicos)"],
+            index=0,
+            key="metric_mode_totales"
+        )
+
+
         st.subheader("Evolución horaria total")
 
-        if evol_total.empty:
-            st.info("No hay datos para la evolución horaria total.")
-        else:
-            chart_total = evol_total.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
-            st.line_chart(chart_total, use_container_width=True)
-
-            trx_mi_linea = int(df_f[df_f["NUM_LINEA"] == my_line]["CANT_TRAX"].sum())
-            trx_total_filtro = int(df_f["CANT_TRAX"].sum())
-
-            share_mi_linea = (
-                trx_mi_linea / trx_total_filtro
-                if trx_total_filtro > 0 else 0
-            )
-
-            k1, k2, k3 = st.columns(3)
-
-            k1.metric(
-                f"Transacciones línea {my_line}",
-                f"{trx_mi_linea:,}".replace(",", ".")
-            )
-
-            k2.metric(
-                "Transacciones totales del filtro",
-                f"{trx_total_filtro:,}".replace(",", ".")
-            )
-
-            k3.metric(
-                f"Share línea {my_line}",
-                f"{share_mi_linea * 100:.2f}%"
-            )
-
-            st.subheader("Comparación por fecha: totales y share por línea")
-
-            # usar todas las fechas disponibles de la base original, pero restringido a las líneas seleccionadas
-            df_fechas = df[df["NUM_LINEA"].isin(selected_lines)].copy()
-
-            if df_fechas.empty:
-                st.info("No hay datos para construir la comparación por fechas.")
+        if metric_mode == "Demanda (transacciones)":
+            if evol_total.empty:
+                st.info("No hay datos para la evolución horaria total.")
             else:
-                df_fechas["FECHA_LABEL"] = pd.to_datetime(df_fechas["FECHA_ONLY"]).dt.strftime("%d/%m/%Y")
-                # Totales por fecha y línea
-                totales_fecha_linea = (
-                    df_fechas.groupby(["FECHA_ONLY", "NUM_LINEA"], as_index=False)
-                    .agg(trx_total=("CANT_TRAX", "sum"))
+                chart_total = evol_total.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
+                st.line_chart(chart_total, use_container_width=True)
+
+                trx_mi_linea = int(df_f[df_f["NUM_LINEA"] == my_line]["CANT_TRAX"].sum())
+                trx_total_filtro = int(df_f["CANT_TRAX"].sum())
+
+                share_mi_linea = (
+                    trx_mi_linea / trx_total_filtro
+                    if trx_total_filtro > 0 else 0
                 )
 
-                # Total del día para calcular shares
-                total_fecha = (
-                    df_fechas.groupby("FECHA_ONLY", as_index=False)
-                    .agg(trx_total_dia=("CANT_TRAX", "sum"))
+                k1, k2, k3 = st.columns(3)
+
+                k1.metric(
+                    f"Transacciones línea {my_line}",
+                    f"{trx_mi_linea:,}".replace(",", ".")
                 )
 
-                share_fecha_linea = totales_fecha_linea.merge(total_fecha, on="FECHA_ONLY", how="left")
-                share_fecha_linea["share_linea"] = np.where(
-                    share_fecha_linea["trx_total_dia"] > 0,
-                    share_fecha_linea["trx_total"] / share_fecha_linea["trx_total_dia"],
-                    0
+                k2.metric(
+                    "Transacciones totales del filtro",
+                    f"{trx_total_filtro:,}".replace(",", ".")
                 )
 
-                # Pivot para gráficos
-                chart_totales = (
-                    totales_fecha_linea
-                    .pivot(index="FECHA_ONLY", columns="NUM_LINEA", values="trx_total")
-                    .fillna(0)
-                    .sort_index()
+                k3.metric(
+                    f"Share línea {my_line}",
+                    f"{share_mi_linea * 100:.2f}%"
                 )
 
-                chart_share = (
-                    share_fecha_linea
-                    .assign(share_linea=lambda x: (x["share_linea"] * 100).round(2))  # ← clave
-                    .pivot(index="FECHA_ONLY", columns="NUM_LINEA", values="share_linea")
-                    .fillna(0)
-                    .sort_index()
+                st.subheader("Comparación por fecha: totales y share por línea")
+
+                df_fechas = df[df["NUM_LINEA"].isin(selected_lines)].copy()
+
+                if df_fechas.empty:
+                    st.info("No hay datos para construir la comparación por fechas.")
+                else:
+                    totales_fecha_linea = (
+                        df_fechas.groupby(["FECHA_ONLY", "NUM_LINEA"], as_index=False)
+                        .agg(total=("CANT_TRAX", "sum"))
+                    )
+
+                    total_fecha = (
+                        df_fechas.groupby("FECHA_ONLY", as_index=False)
+                        .agg(total_dia=("CANT_TRAX", "sum"))
+                    )
+
+                    share_fecha_linea = totales_fecha_linea.merge(total_fecha, on="FECHA_ONLY", how="left")
+                    share_fecha_linea["share_linea"] = np.where(
+                        share_fecha_linea["total_dia"] > 0,
+                        share_fecha_linea["total"] / share_fecha_linea["total_dia"],
+                        0
+                    )
+
+                    chart_totales = (
+                        totales_fecha_linea
+                        .pivot(index="FECHA_ONLY", columns="NUM_LINEA", values="total")
+                        .fillna(0)
+                        .sort_index()
+                    )
+
+                    chart_share = (
+                        share_fecha_linea
+                        .assign(share_linea=lambda x: (x["share_linea"] * 100).round(2))
+                        .pivot(index="FECHA_ONLY", columns="NUM_LINEA", values="share_linea")
+                        .fillna(0)
+                        .sort_index()
+                    )
+
+                    col_g1, col_g2 = st.columns(2)
+
+                    with col_g1:
+                        st.markdown("**Totales por fecha y línea**")
+                        st.bar_chart(chart_totales, use_container_width=True)
+
+                    with col_g2:
+                        st.markdown("**Share por fecha y línea**")
+                        st.bar_chart(chart_share, use_container_width=True)
+
+                    with st.expander("Ver tabla de totales y shares por fecha", expanded=False):
+                        tabla_comp = share_fecha_linea.copy()
+                        tabla_comp["share_linea"] = (tabla_comp["share_linea"] * 100).round(2)
+                        st.dataframe(tabla_comp, use_container_width=True)
+
+        else:
+            evol_total_oferta = (
+                df_f[df_f["NUM_LINEA"].isin(selected_lines)]
+                .groupby(["HORA", "NUM_LINEA"], as_index=False)
+                .agg(internos=("INTERNO", pd.Series.nunique))
+                .sort_values(["HORA", "NUM_LINEA"])
+            )
+
+            if evol_total_oferta.empty:
+                st.info("No hay datos para la evolución horaria total.")
+            else:
+                chart_total = evol_total_oferta.pivot(index="HORA", columns="NUM_LINEA", values="internos").fillna(0)
+                st.line_chart(chart_total, use_container_width=True)
+
+                oferta_mi_linea = int(df_f[df_f["NUM_LINEA"] == my_line]["INTERNO"].nunique())
+                oferta_total_filtro = int(df_f["INTERNO"].nunique())
+
+                share_mi_linea = (
+                    oferta_mi_linea / oferta_total_filtro
+                    if oferta_total_filtro > 0 else 0
                 )
 
-                col_g1, col_g2 = st.columns(2)
+                k1, k2, k3 = st.columns(3)
 
-                with col_g1:
-                    st.markdown("**Totales por fecha y línea**")
-                    st.bar_chart(chart_totales, use_container_width=True)
+                k1.metric(
+                    f"Internos únicos línea {my_line}",
+                    f"{oferta_mi_linea:,}".replace(",", ".")
+                )
 
-                with col_g2:
-                    st.markdown("**Share por fecha y línea**")
-                    st.bar_chart(chart_share, use_container_width=True)
+                k2.metric(
+                    "Internos únicos totales del filtro",
+                    f"{oferta_total_filtro:,}".replace(",", ".")
+                )
 
-                # tabla opcional de apoyo
-                with st.expander("Ver tabla de totales y shares por fecha", expanded=False):
-                    tabla_comp = share_fecha_linea.copy()
-                    tabla_comp["share_linea"] = (tabla_comp["share_linea"] * 100).round(2)
-                    st.dataframe(tabla_comp, use_container_width=True)
+                k3.metric(
+                    f"Share línea {my_line}",
+                    f"{share_mi_linea * 100:.2f}%"
+                )
+
+                st.subheader("Comparación por fecha: totales y share por línea")
+
+                df_fechas = df[df["NUM_LINEA"].isin(selected_lines)].copy()
+
+                if df_fechas.empty:
+                    st.info("No hay datos para construir la comparación por fechas.")
+                else:
+                    totales_fecha_linea = (
+                        df_fechas.groupby(["FECHA_ONLY", "NUM_LINEA"], as_index=False)
+                        .agg(total=("INTERNO", pd.Series.nunique))
+                    )
+
+                    total_fecha = (
+                        df_fechas.groupby("FECHA_ONLY", as_index=False)
+                        .agg(total_dia=("INTERNO", pd.Series.nunique))
+                    )
+
+                    share_fecha_linea = totales_fecha_linea.merge(total_fecha, on="FECHA_ONLY", how="left")
+                    share_fecha_linea["share_linea"] = np.where(
+                        share_fecha_linea["total_dia"] > 0,
+                        share_fecha_linea["total"] / share_fecha_linea["total_dia"],
+                        0
+                    )
+
+                    chart_totales = (
+                        totales_fecha_linea
+                        .pivot(index="FECHA_ONLY", columns="NUM_LINEA", values="total")
+                        .fillna(0)
+                        .sort_index()
+                    )
+
+                    chart_share = (
+                        share_fecha_linea
+                        .assign(share_linea=lambda x: (x["share_linea"] * 100).round(2))
+                        .pivot(index="FECHA_ONLY", columns="NUM_LINEA", values="share_linea")
+                        .fillna(0)
+                        .sort_index()
+                    )
+
+                    col_g1, col_g2 = st.columns(2)
+
+                    with col_g1:
+                        st.markdown("**Internos únicos por fecha y línea**")
+                        st.bar_chart(chart_totales, use_container_width=True)
+
+                    with col_g2:
+                        st.markdown("**Share por fecha y línea**")
+                        st.bar_chart(chart_share, use_container_width=True)
+
+                    with st.expander("Ver tabla de totales y shares por fecha", expanded=False):
+                        tabla_comp = share_fecha_linea.copy()
+                        tabla_comp["share_linea"] = (tabla_comp["share_linea"] * 100).round(2)
+                        st.dataframe(tabla_comp, use_container_width=True)
 
     download_bytes = to_download_excel(display_df, comp_hex)
     st.download_button(
