@@ -1078,6 +1078,7 @@ with tab_competencia:
             if df_fechas.empty:
                 st.info("No hay datos para construir la comparación por fechas.")
             else:
+                df_fechas["FECHA_LABEL"] = pd.to_datetime(df_fechas["FECHA_ONLY"]).dt.strftime("%d/%m/%Y")
                 # Totales por fecha y línea
                 totales_fecha_linea = (
                     df_fechas.groupby(["FECHA_ONLY", "NUM_LINEA"], as_index=False)
