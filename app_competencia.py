@@ -576,6 +576,24 @@ def color_by_heat_pct(p):
     else:
         return [230, 85, 13, 200]
 
+def color_by_share_demanda(p):
+    if pd.isna(p):
+        return [220, 220, 220, 120]
+
+    if p < 0.05:
+        return [247, 251, 255, 90]    # muy claro
+    elif p < 0.10:
+        return [222, 235, 247, 110]
+    elif p < 0.20:
+        return [198, 219, 239, 130]
+    elif p < 0.35:
+        return [158, 202, 225, 150]
+    elif p < 0.50:
+        return [107, 174, 214, 170]
+    elif p < 0.70:
+        return [49, 130, 189, 190]
+    else:
+        return [8, 81, 156, 210]      # azul intenso
 
 # =========================
 # UI
@@ -710,10 +728,16 @@ with tab_competencia:
         value=False
     )
 
-    show_heatmap = st.sidebar.checkbox(
-        "Mostrar mapa de calor",
-        value=False
+    map_mode = st.sidebar.selectbox(
+        "Modo de visualización del mapa",
+        options=[
+            "Índice de captación",
+            "Mapa de calor por pct_trx_hex",
+            "Mapa de calor por share_demanda"
+        ],
+        index=1
     )
+
     if df_f.empty:
         st.warning("No hay datos para los filtros elegidos.")
         st.stop()
@@ -739,6 +763,8 @@ with tab_competencia:
         points_control["label_pct"] = (
             (points_control["pct_trx_hex"] * 100).round(1).astype(str) + "%"
         )
+
+        points_control["label_share_demanda"] = ((points_control["share_demanda"] * 100).round(1).astype(str) + "%")
 
         map_points_control = points_control.copy()
 
@@ -766,6 +792,8 @@ with tab_competencia:
         map_points_control["label_pct"] = (
             (map_points_control["pct_trx_hex"] * 100).round(1).astype(str) + "%"
         )
+
+        map_points_control["label_share_demanda"] = ((map_points_control["share_demanda"] * 100).round(1).astype(str) + "%")
 
     evol_total = build_hourly_evolution_total(df_f, selected_lines)
 
@@ -795,8 +823,10 @@ with tab_competencia:
             + "\nÍndice captación: " + map_df["indice_captacion"].round(2).astype(str)
         )
 
-        if show_heatmap:
+        if map_mode == "Mapa de calor por pct_trx_hex":
             map_df["fill_color"] = map_df["pct_trx_hex"].apply(color_by_heat_pct)
+        elif map_mode == "Mapa de calor por share_demanda":
+            map_df["fill_color"] = map_df["share_demanda"].apply(color_by_share_demanda)
         else:
             map_df["fill_color"] = map_df["indice_captacion"].apply(color_by_index)
 
@@ -824,12 +854,27 @@ with tab_competencia:
         )
 
         text_layer = None
-        if show_heatmap:
+
+        if map_mode == "Mapa de calor por pct_trx_hex":
             text_layer = pdk.Layer(
                 "TextLayer",
                 data=map_df,
                 get_position="[lon, lat]",
                 get_text="label_pct",
+                get_size=14,
+                get_color=[40, 40, 40, 220],
+                get_angle=0,
+                get_text_anchor="'middle'",
+                get_alignment_baseline="'center'",
+                pickable=False,
+            )
+
+        elif map_mode == "Mapa de calor por share_demanda":
+            text_layer = pdk.Layer(
+                "TextLayer",
+                data=map_df,
+                get_position="[lon, lat]",
+                get_text="label_share_demanda",
                 get_size=14,
                 get_color=[40, 40, 40, 220],
                 get_angle=0,
@@ -902,13 +947,22 @@ with tab_competencia:
 
         st.pydeck_chart(deck, use_container_width=True)
 
-        if show_heatmap:
+        if map_mode == "Mapa de calor por pct_trx_hex":
             st.markdown(
                 """
                 **Mapa de calor por participación en transacciones**
                 - más claro: menor % de trx del total
                 - más oscuro: mayor % de trx del total
                 - la etiqueta indica el **% del total** que representa cada hexágono
+                """
+            )
+        elif map_mode == "Mapa de calor por share_demanda":
+            st.markdown(
+                """
+                **Mapa de calor por share_demanda de mi línea**
+                - más claro: menor share de demanda
+                - más oscuro: mayor share de demanda
+                - la etiqueta indica el **% de share_demanda** de tu línea en cada hexágono
                 """
             )
         else:
@@ -1280,5 +1334,4 @@ with tab_frecuencia:
             file_name="frecuencia_observada.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-
 
