@@ -1045,10 +1045,29 @@ with tab_competencia:
             chart_total = evol_total.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
             st.line_chart(chart_total, use_container_width=True)
 
-            trx_total_global = int(df_f[df_f["NUM_LINEA"] == my_line]["CANT_TRAX"].sum())
-            st.metric(
-                "Transacciones totales del filtro actual",
-                f"{trx_total_global:,}".replace(",", ".")
+            trx_mi_linea = int(df_f[df_f["NUM_LINEA"] == my_line]["CANT_TRAX"].sum())
+            trx_total_filtro = int(df_f["CANT_TRAX"].sum())
+
+            share_mi_linea = (
+                trx_mi_linea / trx_total_filtro
+                if trx_total_filtro > 0 else 0
+            )
+
+            k1, k2, k3 = st.columns(3)
+
+            k1.metric(
+                f"Transacciones línea {my_line}",
+                f"{trx_mi_linea:,}".replace(",", ".")
+            )
+
+            k2.metric(
+                "Transacciones totales del filtro",
+                f"{trx_total_filtro:,}".replace(",", ".")
+            )
+
+            k3.metric(
+                f"Share línea {my_line}",
+                f"{share_mi_linea * 100:.2f}%"
             )
 
     download_bytes = to_download_excel(display_df, comp_hex)
@@ -1334,4 +1353,3 @@ with tab_frecuencia:
             file_name="frecuencia_observada.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-
