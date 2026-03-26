@@ -6,3 +6,4 @@ shapely
 pydeck
 pyogrio
 pyproj
+h3
