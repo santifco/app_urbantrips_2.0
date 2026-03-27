@@ -15,8 +15,8 @@ try:
 except ImportError:
     H3_AVAILABLE = False
 
+st.set_page_config(page_title="Competencia entre líneas", layout="wide")
 
-st.set_page_config(page_title="Competencia entre líneas (H3)", layout="wide")
 
 # =========================
 # Helpers
@@ -57,6 +57,7 @@ def load_geojson(uploaded_geojson_bytes: bytes) -> gpd.GeoDataFrame:
     with tempfile.NamedTemporaryFile(suffix=".geojson", delete=False) as tmp:
         tmp.write(uploaded_geojson_bytes)
         tmp_path = tmp.name
+
     gdf = gpd.read_file(tmp_path, engine="pyogrio")
     return gdf
 
@@ -64,10 +65,13 @@ def load_geojson(uploaded_geojson_bytes: bytes) -> gpd.GeoDataFrame:
 def normalize_line_value(x):
     if pd.isna(x):
         return np.nan
+
     s = str(x).strip()
     digits = "".join(ch for ch in s if ch.isdigit())
+
     if digits == "":
         return np.nan
+
     return int(digits)
 
 
@@ -99,7 +103,7 @@ def geometry_to_paths(geom):
         return [[list(coord) for coord in geom.coords]]
 
     if geom.geom_type == "MultiLineString":
-        return [[list(coord) for coord in part.coords] for part in geom.geoms]
+        return [[[list(coord) for coord in part.coords]] for part in geom.geoms]
 
     return []
 
@@ -118,13 +122,22 @@ def build_routes_layer_df(
         return pd.DataFrame(columns=["linea_norm", "sentido_norm", "path", "color", "tooltip"])
 
     rows = []
+
     for _, row in gdf.iterrows():
         paths = geometry_to_paths(row.geometry)
 
-        for path in paths:
+        flat_paths = []
+        for p in paths:
+            if len(p) == 1 and isinstance(p[0], list) and len(p[0]) > 0 and isinstance(p[0][0], list):
+                flat_paths.append(p[0])
+            else:
+                flat_paths.append(p)
+
+        for path in flat_paths:
             if len(path) >= 2:
                 sentido = row["sentido_norm"]
                 color = [60, 120, 255] if sentido == "IDA" else [255, 140, 50]
+
                 rows.append(
                     {
                         "linea_norm": row["linea_norm"],
@@ -139,14 +152,15 @@ def build_routes_layer_df(
 
 
 @st.cache_data(show_spinner=False)
-def list_excel_sheets(uploaded_file_bytes: bytes) -> list[str]:
+def list_excel_sheets(uploaded_file_bytes: bytes, filename: str) -> list[str]:
     xls = pd.ExcelFile(io.BytesIO(uploaded_file_bytes))
     return xls.sheet_names
 
 
 @st.cache_data(show_spinner=False)
-def load_excel(uploaded_file_bytes: bytes, sheet_name: str) -> pd.DataFrame:
-    return pd.read_excel(io.BytesIO(uploaded_file_bytes), sheet_name=sheet_name)
+def load_excel(uploaded_file_bytes: bytes, filename: str, sheet_name: str) -> pd.DataFrame:
+    df = pd.read_excel(io.BytesIO(uploaded_file_bytes), sheet_name=sheet_name)
+    return df
 
 
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -198,9 +212,41 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def filter_by_time_block(df: pd.DataFrame, block_name: str) -> pd.DataFrame:
-    start_h, end_h = TIME_BLOCKS[block_name]
-    return df[(df["HORA"] >= start_h) & (df["HORA"] < end_h)].copy()
+
+
+
+
+def compute_headways(df_hex, selected_lines):
+    df = df_hex[df_hex["NUM_LINEA"].isin(selected_lines)].copy()
+    df = df.sort_values("DATE_TIME")
+
+    results = []
+
+    for (linea, sentido, hex_id), group in df.groupby(["NUM_LINEA", "SENTIDO", "hex_id"]):
+        times = group["DATE_TIME"].sort_values()
+
+        if len(times) < 2:
+            continue
+
+        diffs = times.diff().dt.total_seconds() / 60
+        diffs = diffs.dropna()
+
+        if len(diffs) == 0:
+            continue
+
+        results.append({
+            "linea": linea,
+            "sentido": sentido,
+            "hex_id": hex_id,
+            "headway_mean": diffs.mean(),
+            "headway_median": diffs.median(),
+            "headway_p90": diffs.quantile(0.9),
+            "pasos_observados": len(times)
+        })
+
+    return pd.DataFrame(results)
+
+
 
 
 def h3_boundary_lonlat(hex_id: str):
@@ -221,7 +267,7 @@ def h3_info(hex_id: str) -> dict:
 
 
 @st.cache_data(show_spinner=False)
-def assign_points_to_hexes_h3(df_prepared: pd.DataFrame, h3_res: int) -> pd.DataFrame:
+def assign_points_to_hexes(df_prepared: pd.DataFrame, h3_res: int) -> pd.DataFrame:
     df = df_prepared.copy()
     df["hex_id"] = [
         h3.latlng_to_cell(lat, lon, h3_res)
@@ -231,7 +277,7 @@ def assign_points_to_hexes_h3(df_prepared: pd.DataFrame, h3_res: int) -> pd.Data
 
 
 @st.cache_data(show_spinner=False)
-def build_hex_polygons_h3(df_prepared: pd.DataFrame, h3_res: int) -> pd.DataFrame:
+def build_hex_polygons(df_prepared: pd.DataFrame, h3_res: int) -> pd.DataFrame:
     hex_ids = pd.Series(
         [h3.latlng_to_cell(lat, lon, h3_res) for lat, lon in zip(df_prepared["LATITUDE"], df_prepared["LONGITUDE"])],
         name="hex_id",
@@ -245,6 +291,11 @@ def build_hex_polygons_h3(df_prepared: pd.DataFrame, h3_res: int) -> pd.DataFram
     out["lat"] = out["hex_id"].apply(lambda hid: h3.cell_to_latlng(hid)[0])
     out["lon"] = out["hex_id"].apply(lambda hid: h3.cell_to_latlng(hid)[1])
     return out
+
+
+def filter_by_time_block(df: pd.DataFrame, block_name: str) -> pd.DataFrame:
+    start_h, end_h = TIME_BLOCKS[block_name]
+    return df[(df["HORA"] >= start_h) & (df["HORA"] < end_h)].copy()
 
 
 def compute_metrics(
@@ -328,7 +379,6 @@ def compute_metrics(
 
 def build_line_comparison(df_hex: pd.DataFrame, hex_id: str, selected_lines: list[int]) -> pd.DataFrame:
     sub = df_hex[(df_hex["hex_id"] == hex_id) & (df_hex["NUM_LINEA"].isin(selected_lines))].copy()
-
     out = (
         sub.groupby("NUM_LINEA", as_index=False)
         .agg(
@@ -337,7 +387,6 @@ def build_line_comparison(df_hex: pd.DataFrame, hex_id: str, selected_lines: lis
             registros=("INTERNO", "count"),
         )
     )
-
     trx_total = out["trx"].sum()
     int_total = out["internos"].sum()
 
@@ -345,7 +394,6 @@ def build_line_comparison(df_hex: pd.DataFrame, hex_id: str, selected_lines: lis
     out["share_oferta"] = np.where(int_total > 0, out["internos"] / int_total, 0)
     out["indice_captacion"] = np.where(out["share_oferta"] > 0, out["share_demanda"] / out["share_oferta"], np.nan)
     out["trx_por_interno"] = np.where(out["internos"] > 0, out["trx"] / out["internos"], 0)
-
     return out.sort_values("trx", ascending=False)
 
 
@@ -363,6 +411,7 @@ def build_hourly_evolution(df_hex: pd.DataFrame, hex_id: str, selected_lines: li
 
 def build_hourly_evolution_total(df_filtered: pd.DataFrame, selected_lines: list[int]) -> pd.DataFrame:
     sub = df_filtered[df_filtered["NUM_LINEA"].isin(selected_lines)].copy()
+
     out = (
         sub.groupby(["HORA", "NUM_LINEA"], as_index=False)
         .agg(
@@ -370,7 +419,85 @@ def build_hourly_evolution_total(df_filtered: pd.DataFrame, selected_lines: list
             internos=("INTERNO", pd.Series.nunique),
         )
     )
+
     return out.sort_values(["HORA", "NUM_LINEA"])
+
+
+def build_vehicle_trace(df_filtered: pd.DataFrame, linea: int, interno: str, sentido: str) -> pd.DataFrame:
+    sub = df_filtered.copy()
+    sub["INTERNO"] = sub["INTERNO"].astype(str).str.strip()
+
+    sub = sub[
+        (sub["NUM_LINEA"] == linea)
+        & (sub["INTERNO"] == str(interno).strip())
+        & (sub["SENTIDO"] == sentido)
+    ].copy()
+
+    sub = sub.sort_values("DATE_TIME").reset_index(drop=True)
+    return sub
+
+
+def build_vehicle_points_animation_df(trace_df: pd.DataFrame, step_idx: int) -> pd.DataFrame:
+    if trace_df.empty:
+        return pd.DataFrame(columns=["LONGITUDE", "LATITUDE", "tooltip", "orden", "is_current"])
+
+    sub = trace_df.iloc[: step_idx + 1].copy().reset_index(drop=True)
+    sub["orden"] = sub.index + 1
+    sub["is_current"] = False
+    sub.loc[sub.index[-1], "is_current"] = True
+
+    sub["tooltip"] = (
+        "Orden: " + sub["orden"].astype(str)
+        + "\nDATE_TIME: " + sub["DATE_TIME"].dt.strftime("%d/%m/%Y %H:%M:%S")
+        + "\nCANT_TRAX: " + sub["CANT_TRAX"].fillna(0).round(0).astype(int).astype(str)
+    )
+
+    return sub[["LONGITUDE", "LATITUDE", "tooltip", "orden", "is_current"]].copy()
+
+
+def build_current_position_df(trace_df: pd.DataFrame, step_idx: int) -> pd.DataFrame:
+    if trace_df.empty:
+        return pd.DataFrame(columns=["LONGITUDE", "LATITUDE", "tooltip"])
+
+    row = trace_df.iloc[[step_idx]].copy()
+
+    row["tooltip"] = (
+        "Posición actual"
+        + "\nDATE_TIME: " + row["DATE_TIME"].dt.strftime("%d/%m/%Y %H:%M:%S")
+        + "\nCANT_TRAX: " + row["CANT_TRAX"].fillna(0).round(0).astype(int).astype(str)
+    )
+
+    return row[["LONGITUDE", "LATITUDE", "tooltip"]].copy()
+
+
+def build_vehicle_points_df(trace_df: pd.DataFrame) -> pd.DataFrame:
+    if trace_df.empty:
+        return pd.DataFrame(columns=["LONGITUDE", "LATITUDE", "tooltip", "orden"])
+
+    out = trace_df.copy().reset_index(drop=True)
+    out["orden"] = out.index + 1
+    out["tooltip"] = (
+        "Orden: " + out["orden"].astype(str)
+        + "\nDATE_TIME: " + out["DATE_TIME"].dt.strftime("%d/%m/%Y %H:%M:%S")
+        + "\nCANT_TRAX: " + out["CANT_TRAX"].fillna(0).round(0).astype(int).astype(str)
+    )
+
+    return out[["LONGITUDE", "LATITUDE", "orden", "tooltip"]].copy()
+
+
+def build_vehicle_hourly(trace_df: pd.DataFrame) -> pd.DataFrame:
+    if trace_df.empty:
+        return pd.DataFrame(columns=["HORA", "trx", "registros"])
+
+    out = (
+        trace_df.groupby("HORA", as_index=False)
+        .agg(
+            trx=("CANT_TRAX", "sum"),
+            registros=("DATE_TIME", "count"),
+        )
+        .sort_values("HORA")
+    )
+    return out
 
 
 def to_download_excel(points_df: pd.DataFrame, compare_df: Optional[pd.DataFrame] = None) -> bytes:
@@ -396,6 +523,7 @@ def color_by_index(x):
 def color_by_heat_pct(p):
     if pd.isna(p):
         return [200, 200, 200, 120]
+
     if p <= 0:
         return [245, 245, 245, 80]
     elif p < 0.01:
@@ -409,12 +537,12 @@ def color_by_heat_pct(p):
     else:
         return [230, 85, 13, 200]
 
-
 def color_by_share_demanda(p):
     if pd.isna(p):
         return [220, 220, 220, 120]
+
     if p < 0.05:
-        return [247, 251, 255, 90]
+        return [247, 251, 255, 90]    # muy claro
     elif p < 0.10:
         return [222, 235, 247, 110]
     elif p < 0.20:
@@ -426,25 +554,24 @@ def color_by_share_demanda(p):
     elif p < 0.70:
         return [49, 130, 189, 190]
     else:
-        return [8, 81, 156, 210]
-
+        return [8, 81, 156, 210]      # azul intenso
 
 # =========================
 # UI
 # =========================
 
 st.title("Análisis de competencia entre líneas por hexágonos H3")
-st.caption("Subí tu Excel y analizá competencia usando resolución H3 real.")
+st.caption("Subí tu Excel y analizá competencia o reconstruí el recorrido de un colectivo.")
 
 if not H3_AVAILABLE:
-    st.error("Instalá h3: pip install h3")
+    st.error("Instalá h3 con: pip install h3")
     st.stop()
 
 with st.expander("Carga de archivos y configuración inicial", expanded=True):
     uploaded_file = st.file_uploader(
         "Subir archivo Excel",
         type=["xlsx", "xls"],
-        help="Debe contener: FECHA, DATE_TIME, NUM_LINEA, SENTIDO, INTERNO, LONGITUDE, LATITUDE, CANT_TRAX.",
+        help="El archivo debe contener al menos: FECHA, DATE_TIME, NUM_LINEA, SENTIDO, INTERNO, LONGITUDE, LATITUDE, CANT_TRAX.",
         key="uploader_excel",
     )
 
@@ -460,10 +587,10 @@ with st.expander("Carga de archivos y configuración inicial", expanded=True):
         st.stop()
 
     file_bytes = uploaded_file.getvalue()
-    sheets = list_excel_sheets(file_bytes)
+    sheets = list_excel_sheets(file_bytes, uploaded_file.name)
     sheet = st.selectbox("Hoja del Excel", sheets, key="sheet_selector")
 
-    raw_df = load_excel(file_bytes, sheet)
+    raw_df = load_excel(file_bytes, uploaded_file.name, sheet)
     raw_df = standardize_columns(raw_df)
 
     ok, missing_cols = validate_columns(raw_df)
@@ -480,6 +607,7 @@ with st.expander("Carga de archivos y configuración inicial", expanded=True):
             geojson_bytes = uploaded_geojson.getvalue()
             routes_raw = load_geojson(geojson_bytes)
             routes_gdf = prepare_routes_gdf(routes_raw)
+
             st.success(f"GeoJSON cargado: {len(routes_gdf):,} recorridos".replace(",", "."))
         except Exception as e:
             st.error(f"No se pudo leer/procesar el GeoJSON: {e}")
@@ -489,17 +617,37 @@ with st.expander("Carga de archivos y configuración inicial", expanded=True):
         st.error("No quedaron registros válidos luego de la limpieza.")
         st.stop()
 
-    c1, c2 = st.columns(2)
-    with c1:
+    col_info1, col_info2 = st.columns(2)
+
+    with col_info1:
         st.metric("Registros válidos", f"{len(df):,}".replace(",", "."))
         st.metric("Hojas detectadas", len(sheets))
-    with c2:
-        st.metric("Recorridos cargados", f"{len(routes_gdf):,}".replace(",", ".") if routes_gdf is not None else "0")
+
+    with col_info2:
+        if routes_gdf is not None:
+            st.metric("Recorridos cargados", f"{len(routes_gdf):,}".replace(",", "."))
+        else:
+            st.metric("Recorridos cargados", "0")
 
     with st.expander("Vista previa de la base procesada", expanded=False):
         st.dataframe(df.head(20), use_container_width=True)
 
-tab_competencia = st.tabs(["Competencia por hexágonos H3"])[0]
+    if routes_gdf is not None:
+        with st.expander("Vista previa del GeoJSON de recorridos", expanded=False):
+            st.dataframe(
+                routes_gdf[["linea", "linea_norm", "sentido", "sentido_norm"]].head(20),
+                use_container_width=True,
+            )
+
+tab_competencia, tab_recorrido, tab_frecuencia = st.tabs([
+    "Competencia por hexágonos",
+    "Recorrido de un colectivo",
+    "Frecuencia observada"
+])
+
+# =========================
+# SOLAPA 1: COMPETENCIA
+# =========================
 
 with tab_competencia:
     st.sidebar.header("Filtros")
@@ -512,18 +660,26 @@ with tab_competencia:
     lineas = sorted(df_f["NUM_LINEA"].dropna().astype(int).unique().tolist())
     my_line = st.sidebar.selectbox("Mi línea", lineas)
 
-    selected_lines_key = "selected_lines_competencia_h3"
+    # Clave de estado para guardar la selección entre reruns
+    selected_lines_key = "selected_lines_competencia"
+
+    # Inicialización: solo la primera vez, o si la selección previa ya no es válida
     default_comp = [x for x in lineas if x != my_line]
     default_selected = [my_line] + default_comp
 
     if selected_lines_key not in st.session_state:
         st.session_state[selected_lines_key] = default_selected
     else:
+        # Mantener solo líneas que sigan existiendo en el filtro actual
         st.session_state[selected_lines_key] = [
             x for x in st.session_state[selected_lines_key] if x in lineas
         ]
+
+        # Si quedó vacío, volver a default
         if not st.session_state[selected_lines_key]:
             st.session_state[selected_lines_key] = default_selected
+
+        # Asegurar que mi línea siempre esté incluida
         if my_line not in st.session_state[selected_lines_key]:
             st.session_state[selected_lines_key] = [my_line] + st.session_state[selected_lines_key]
 
@@ -533,6 +689,7 @@ with tab_competencia:
         key=selected_lines_key,
     )
 
+    # Refuerzo final por si el usuario desmarca mi línea
     if my_line not in selected_lines:
         selected_lines = [my_line] + selected_lines
         st.session_state[selected_lines_key] = selected_lines
@@ -549,22 +706,25 @@ with tab_competencia:
     selected_hours = st.sidebar.slider("Rango de hora fino", 0, 23, (0, 23))
     df_f = df_f[(df_f["HORA"] >= selected_hours[0]) & (df_f["HORA"] <= selected_hours[1])].copy()
 
-    h3_label = st.sidebar.selectbox("Resolución H3", list(H3_RES_OPTIONS.keys()), index=2)
-    h3_res = H3_RES_OPTIONS[h3_label]
+    hex_label = st.sidebar.selectbox("Resolución H3", list(H3_RES_OPTIONS.keys()), index=2)
+    h3_res = H3_RES_OPTIONS[hex_label]
 
     min_trx_hex = st.sidebar.number_input("Mínimo de transacciones totales por hexágono", min_value=1, value=50, step=10)
     min_lines_competing = st.sidebar.number_input("Mínimo de líneas presentes", min_value=1, value=2, step=1)
 
-    show_trx_circles = st.sidebar.checkbox("Mostrar círculos por transacciones totales", value=False)
+    show_trx_circles = st.sidebar.checkbox(
+        "Mostrar círculos por transacciones totales",
+        value=False
+    )
 
     map_mode = st.sidebar.selectbox(
         "Modo de visualización del mapa",
         options=[
             "Índice de captación",
             "Mapa de calor por pct_trx_hex",
-            "Mapa de calor por share_demanda",
+            "Mapa de calor por share_demanda"
         ],
-        index=1,
+        index=1
     )
 
     if df_f.empty:
@@ -572,8 +732,8 @@ with tab_competencia:
         st.stop()
 
     with st.spinner("Generando hexágonos H3 y métricas..."):
-        df_hex = assign_points_to_hexes_h3(df_f, h3_res)
-        hex_polygons = build_hex_polygons_h3(df_f, h3_res)
+        df_hex = assign_points_to_hexes(df_f, h3_res)
+        hex_polygons = build_hex_polygons(df_f, h3_res)
 
         points_control = compute_metrics(
             df_hex=df_hex,
@@ -590,8 +750,13 @@ with tab_competencia:
         else:
             points_control["pct_trx_hex"] = 0.0
 
-        points_control["label_pct"] = ((points_control["pct_trx_hex"] * 100).round(1).astype(str) + "%")
-        points_control["label_share_demanda"] = ((points_control["share_demanda"] * 100).round(1).astype(str) + "%")
+        points_control["label_pct"] = (
+            (points_control["pct_trx_hex"] * 100).round(1).astype(str) + "%"
+        )
+
+        points_control["label_share_demanda"] = (
+            (points_control["share_demanda"] * 100).round(1).astype(str) + "%"
+        )
 
         map_points_control = points_control.copy()
 
@@ -601,7 +766,7 @@ with tab_competencia:
                 "Excluir hexágono del mapa de calor",
                 options=["NINGUNO"] + sorted(map_points_control["hex_id"].astype(str).unique().tolist()),
                 index=0,
-                key="exclude_hex_heatmap_h3",
+                key="exclude_hex_heatmap"
             )
 
             if exclude_hex != "NINGUNO":
@@ -616,22 +781,28 @@ with tab_competencia:
         else:
             map_points_control["pct_trx_hex"] = 0.0
 
-        map_points_control["label_pct"] = ((map_points_control["pct_trx_hex"] * 100).round(1).astype(str) + "%")
-        map_points_control["label_share_demanda"] = ((map_points_control["share_demanda"] * 100).round(1).astype(str) + "%")
+        map_points_control["label_pct"] = (
+            (map_points_control["pct_trx_hex"] * 100).round(1).astype(str) + "%"
+        )
+
+        map_points_control["label_share_demanda"] = (
+            (map_points_control["share_demanda"] * 100).round(1).astype(str) + "%"
+        )
 
     evol_total = build_hourly_evolution_total(df_f, selected_lines)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Registros filtrados", f"{len(df_f):,}".replace(",", "."))
     c2.metric("Líneas comparadas", f"{len(selected_lines)}")
-    c3.metric("Hexágonos H3 con competencia", f"{points_control['hex_id'].nunique():,}".replace(",", ".") if not points_control.empty else "0")
+    c3.metric("Hexágonos con competencia", f"{points_control['hex_id'].nunique():,}".replace(",", ".") if not points_control.empty else "0")
     c4.metric("Mi línea", str(my_line))
 
-    st.subheader("Mapa de puntos de control H3")
+    st.subheader("Mapa de puntos de control")
+
     st.caption(f"Resolución seleccionada: H3 res {h3_res}")
 
-    if exclude_hex != "NINGUNO":
-        st.info(f"Mapa de calor recalculado excluyendo el hexágono H3: {exclude_hex}")
+    if exclude_hex and exclude_hex != "NINGUNO":
+        st.info(f"Mapa de calor recalculado excluyendo el hexágono: {exclude_hex}")
 
     if points_control.empty:
         st.warning("No se encontraron hexágonos competitivos con los umbrales elegidos.")
@@ -639,7 +810,7 @@ with tab_competencia:
         map_df = map_points_control.copy()
 
         map_df["tooltip"] = (
-            "Hex H3: " + map_df["hex_id"].astype(str)
+            "Hex: " + map_df["hex_id"].astype(str)
             + "\nTrx total: " + map_df["trx_total_hex"].round(0).astype(int).astype(str)
             + "\n% del total: " + (map_df["pct_trx_hex"] * 100).round(2).astype(str) + "%"
             + "\nLíneas presentes: " + map_df["lineas_presentes"].astype(int).astype(str)
@@ -655,8 +826,8 @@ with tab_competencia:
         else:
             map_df["fill_color"] = map_df["indice_captacion"].apply(color_by_index)
 
-        # radio aprox. basado en el lado promedio H3
         edge_m = h3.average_hexagon_edge_length(h3_res, unit="m")
+
         map_df["circle_radius"] = 0.0
         if map_df["trx_total_hex"].max() > 0:
             map_df["circle_radius"] = (
@@ -680,6 +851,7 @@ with tab_competencia:
         )
 
         text_layer = None
+
         if map_mode == "Mapa de calor por pct_trx_hex":
             text_layer = pdk.Layer(
                 "TextLayer",
@@ -693,6 +865,7 @@ with tab_competencia:
                 get_alignment_baseline="'center'",
                 pickable=False,
             )
+
         elif map_mode == "Mapa de calor por share_demanda":
             text_layer = pdk.Layer(
                 "TextLayer",
@@ -707,13 +880,22 @@ with tab_competencia:
                 pickable=False,
             )
 
+        view_state = pdk.ViewState(
+            latitude=float(center_lat),
+            longitude=float(center_lon),
+            zoom=10.5,
+            pitch=0,
+        )
+
         routes_layer = None
+
         if routes_gdf is not None:
             routes_df = build_routes_layer_df(
                 routes_gdf=routes_gdf,
                 selected_line=my_line,
                 selected_sentido=selected_sentido,
             )
+
             if not routes_df.empty:
                 routes_layer = pdk.Layer(
                     "PathLayer",
@@ -727,6 +909,7 @@ with tab_competencia:
                 )
 
         trx_circle_layer = None
+
         if show_trx_circles:
             trx_circle_layer = pdk.Layer(
                 "ScatterplotLayer",
@@ -742,19 +925,15 @@ with tab_competencia:
             )
 
         layers = [hex_layer]
+
         if trx_circle_layer is not None:
             layers.append(trx_circle_layer)
+
         if routes_layer is not None:
             layers.append(routes_layer)
+
         if text_layer is not None:
             layers.append(text_layer)
-
-        view_state = pdk.ViewState(
-            latitude=float(center_lat),
-            longitude=float(center_lon),
-            zoom=10.5,
-            pitch=0,
-        )
 
         deck = pdk.Deck(
             layers=layers,
@@ -764,6 +943,37 @@ with tab_competencia:
         )
 
         st.pydeck_chart(deck, use_container_width=True)
+
+        if map_mode == "Mapa de calor por pct_trx_hex":
+            st.markdown(
+                """
+                **Mapa de calor por participación en transacciones**
+                - más claro: menor % de trx del total
+                - más oscuro: mayor % de trx del total
+                - la etiqueta indica el **% del total** que representa cada hexágono
+                """
+            )
+        elif map_mode == "Mapa de calor por share_demanda":
+            st.markdown(
+                """
+                **Mapa de calor por share_demanda de mi línea**
+                - más claro: menor share de demanda
+                - más oscuro: mayor share de demanda
+                - la etiqueta indica el **% de share_demanda** de tu línea en cada hexágono
+                """
+            )
+        else:
+            st.markdown(
+                """
+                **Interpretación de colores**
+                - 🔴 Rojo: índice de captación < 0.8
+                - ⚪ Gris: índice de captación entre 0.8 y 1.2
+                - 🟢 Verde: índice de captación > 1.2
+                """
+            )
+
+        if show_trx_circles:
+            st.markdown("🔵 El tamaño del círculo representa las transacciones totales del hexágono.")
 
     st.subheader("Ranking de puntos de control")
 
@@ -794,16 +1004,17 @@ with tab_competencia:
         display_df["trx_por_interno"] = display_df["trx_por_interno"].round(2)
         display_df["indice_captacion"] = display_df["indice_captacion"].round(2)
         display_df["score_control"] = display_df["score_control"].round(3)
+
         st.dataframe(display_df, use_container_width=True, height=420)
 
-    st.subheader("Detalle de un punto de control H3")
+    st.subheader("Detalle de un punto de control")
 
     if not points_control.empty:
-        selected_hex = st.selectbox("Elegir hexágono H3", points_control["hex_id"].tolist())
+        selected_hex = st.selectbox("Elegir hexágono", points_control["hex_id"].tolist())
 
         info_hex = h3_info(selected_hex)
         st.caption(
-            f"Hexágono seleccionado: res {info_hex['resolucion']} | "
+            f"Hexágono seleccionado: resolución {info_hex['resolucion']} | "
             f"área aprox. {info_hex['area_km2']:.3f} km² | "
             f"lado aprox. {info_hex['lado_m']:.0f} m"
         )
@@ -830,10 +1041,967 @@ with tab_competencia:
                 chart_df = evol_hex.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
                 st.line_chart(chart_df, use_container_width=True)
 
+        metric_mode = st.selectbox(
+            "Métrica para visualizar",
+            [
+                "Demanda (transacciones)",
+                "Oferta (internos únicos)",
+                "Pasajeros por coche"
+            ],
+            index=0,
+            key="metric_mode_totales"
+        )
+
+
+        st.subheader("Evolución horaria total")
+
+        if metric_mode == "Demanda (transacciones)":
+            if evol_total.empty:
+                st.info("No hay datos para la evolución horaria total.")
+            else:
+                chart_total = evol_total.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
+                st.line_chart(chart_total, use_container_width=True)
+
+                trx_mi_linea = int(df_f[df_f["NUM_LINEA"] == my_line]["CANT_TRAX"].sum())
+                trx_total_filtro = int(df_f["CANT_TRAX"].sum())
+
+                share_mi_linea = (
+                    trx_mi_linea / trx_total_filtro
+                    if trx_total_filtro > 0 else 0
+                )
+
+                k1, k2, k3 = st.columns(3)
+
+                k1.metric(
+                    f"Transacciones línea {my_line}",
+                    f"{trx_mi_linea:,}".replace(",", ".")
+                )
+
+                k2.metric(
+                    "Transacciones totales del filtro",
+                    f"{trx_total_filtro:,}".replace(",", ".")
+                )
+
+                k3.metric(
+                    f"Share línea {my_line}",
+                    f"{share_mi_linea * 100:.2f}%"
+                )
+
+                st.subheader("Comparación por fecha: totales y share por línea")
+
+                df_fechas = df[df["NUM_LINEA"].isin(selected_lines)].copy()
+
+                if df_fechas.empty:
+                    st.info("No hay datos para construir la comparación por fechas.")
+                else:
+                    totales_fecha_linea = (
+                        df_fechas.groupby(["FECHA_ONLY", "NUM_LINEA"], as_index=False)
+                        .agg(total=("CANT_TRAX", "sum"))
+                    )
+
+                    total_fecha = (
+                        df_fechas.groupby("FECHA_ONLY", as_index=False)
+                        .agg(total_dia=("CANT_TRAX", "sum"))
+                    )
+
+                    share_fecha_linea = totales_fecha_linea.merge(total_fecha, on="FECHA_ONLY", how="left")
+                    share_fecha_linea["share_linea"] = np.where(
+                        share_fecha_linea["total_dia"] > 0,
+                        share_fecha_linea["total"] / share_fecha_linea["total_dia"],
+                        0
+                    )
+
+                    col_g1, col_g2 = st.columns(2)
+
+                    # =========================
+                    # DEMANDA - Totales
+                    # =========================
+                    chart_totales_plot = totales_fecha_linea.copy()
+                    chart_totales_plot["FECHA_ONLY"] = pd.to_datetime(chart_totales_plot["FECHA_ONLY"])
+                    chart_totales_plot = chart_totales_plot.sort_values(["FECHA_ONLY", "NUM_LINEA"])
+
+                    chart_totales_plot["fecha_label"] = chart_totales_plot["FECHA_ONLY"].apply(
+                        lambda x: f"{x.strftime('%b')} {x.day}"
+                    )
+
+                    orden_fechas = (
+                        chart_totales_plot["fecha_label"]
+                        .drop_duplicates()
+                        .tolist()
+                    )
+
+                    with col_g1:
+                        st.markdown("**Totales por fecha y línea**")
+
+                        plot_totales = chart_totales_plot.copy()
+                        plot_totales["fecha_label"] = pd.Categorical(
+                            plot_totales["fecha_label"],
+                            categories=orden_fechas,
+                            ordered=True
+                        )
+
+                        base_totales = (
+                            alt.Chart(plot_totales)
+                            .transform_stack(
+                                stack="total",
+                                as_=["y0", "y1"],
+                                groupby=["fecha_label"],
+                                sort=[alt.SortField("NUM_LINEA", order="ascending")]
+                            )
+                            .transform_calculate(
+                                y_center="(datum.y0 + datum.y1) / 2"
+                            )
+                        )
+
+                        bars_totales = base_totales.mark_bar().encode(
+                            x=alt.X("fecha_label:N", sort=orden_fechas, title="Fecha"),
+                            y=alt.Y("y0:Q", title="Total"),
+                            y2="y1:Q",
+                            color=alt.Color(
+                                "NUM_LINEA:N",
+                                title="Línea",
+                                legend=alt.Legend(orient="bottom")
+                            ),
+                            order=alt.Order("NUM_LINEA:N", sort="ascending")
+                        )
+
+                        text_totales = base_totales.mark_text(
+                            size=12,
+                            color="white",
+                            align="center",
+                            baseline="middle"
+                        ).encode(
+                            x=alt.X("fecha_label:N", sort=orden_fechas),
+                            y=alt.Y("y_center:Q"),
+                            text=alt.Text("total:Q", format=".0f")
+                        )
+
+                        graf_totales = (bars_totales + text_totales).properties(height=400)
+
+                        st.altair_chart(graf_totales, use_container_width=True)
+
+                    # =========================
+                    # DEMANDA - Share
+                    # =========================
+                    chart_share_plot = share_fecha_linea.copy()
+                    chart_share_plot["FECHA_ONLY"] = pd.to_datetime(chart_share_plot["FECHA_ONLY"])
+                    chart_share_plot["share_linea"] = (chart_share_plot["share_linea"] * 100).round(2)
+                    chart_share_plot = chart_share_plot.sort_values(["FECHA_ONLY", "NUM_LINEA"])
+
+                    chart_share_plot["fecha_label"] = chart_share_plot["FECHA_ONLY"].apply(
+                        lambda x: f"{x.strftime('%b')} {x.day}"
+                    )
+
+                    orden_fechas_share = (
+                        chart_share_plot["fecha_label"]
+                        .drop_duplicates()
+                        .tolist()
+                    )
+
+                    with col_g2:
+                        st.markdown("**Share por fecha y línea**")
+
+                        plot_share = chart_share_plot.copy()
+                        plot_share["fecha_label"] = pd.Categorical(
+                            plot_share["fecha_label"],
+                            categories=orden_fechas_share,
+                            ordered=True
+                        )
+
+                        base_share = (
+                            alt.Chart(plot_share)
+                            .transform_stack(
+                                stack="share_linea",
+                                as_=["y0", "y1"],
+                                groupby=["fecha_label"],
+                                sort=[alt.SortField("NUM_LINEA", order="ascending")]
+                            )
+                            .transform_calculate(
+                                y_center="(datum.y0 + datum.y1) / 2"
+                            )
+                        )
+
+                        bars_share = base_share.mark_bar().encode(
+                            x=alt.X("fecha_label:N", sort=orden_fechas_share, title="Fecha"),
+                            y=alt.Y("y0:Q", title="Share (%)"),
+                            y2="y1:Q",
+                            color=alt.Color(
+                                "NUM_LINEA:N",
+                                title="Línea",
+                                legend=alt.Legend(orient="bottom")
+                            ),
+                            order=alt.Order("NUM_LINEA:N", sort="ascending")
+                        )
+
+                        text_share = base_share.mark_text(
+                            size=12,
+                            color="white",
+                            align="center",
+                            baseline="middle"
+                        ).encode(
+                            x=alt.X("fecha_label:N", sort=orden_fechas_share),
+                            y=alt.Y("y_center:Q"),
+                            text=alt.Text("share_linea:Q", format=".1f")
+                        )
+
+                        graf_share = (bars_share + text_share).properties(height=400)
+
+                        st.altair_chart(graf_share, use_container_width=True)
+
+                    with st.expander("Ver tabla de totales y shares por fecha", expanded=False):
+                        tabla_comp = share_fecha_linea.copy()
+                        tabla_comp["FECHA_ONLY"] = pd.to_datetime(tabla_comp["FECHA_ONLY"])
+                        tabla_comp["share_linea"] = (tabla_comp["share_linea"] * 100).round(2)
+                        tabla_comp = tabla_comp.sort_values(["FECHA_ONLY", "NUM_LINEA"])
+                        st.dataframe(tabla_comp, use_container_width=True)
+
+        elif metric_mode == "Oferta (internos únicos)":
+            evol_total_oferta = (
+                df_f[df_f["NUM_LINEA"].isin(selected_lines)]
+                .groupby(["HORA", "NUM_LINEA"], as_index=False)
+                .agg(internos=("INTERNO", pd.Series.nunique))
+                .sort_values(["HORA", "NUM_LINEA"])
+            )
+
+            if evol_total_oferta.empty:
+                st.info("No hay datos para la evolución horaria total.")
+            else:
+                chart_total = evol_total_oferta.pivot(index="HORA", columns="NUM_LINEA", values="internos").fillna(0)
+                st.line_chart(chart_total, use_container_width=True)
+
+                oferta_mi_linea = int(df_f[df_f["NUM_LINEA"] == my_line]["INTERNO"].nunique())
+                oferta_total_filtro = int(df_f["INTERNO"].nunique())
+
+                share_mi_linea = (
+                    oferta_mi_linea / oferta_total_filtro
+                    if oferta_total_filtro > 0 else 0
+                )
+
+                k1, k2, k3 = st.columns(3)
+
+                k1.metric(
+                    f"Internos únicos línea {my_line}",
+                    f"{oferta_mi_linea:,}".replace(",", ".")
+                )
+
+                k2.metric(
+                    "Internos únicos totales del filtro",
+                    f"{oferta_total_filtro:,}".replace(",", ".")
+                )
+
+                k3.metric(
+                    f"Share línea {my_line}",
+                    f"{share_mi_linea * 100:.2f}%"
+                )
+
+                st.subheader("Comparación por fecha: totales y share por línea")
+
+                df_fechas = df[df["NUM_LINEA"].isin(selected_lines)].copy()
+
+                if df_fechas.empty:
+                    st.info("No hay datos para construir la comparación por fechas.")
+                else:
+                    totales_fecha_linea = (
+                        df_fechas.groupby(["FECHA_ONLY", "NUM_LINEA"], as_index=False)
+                        .agg(total=("INTERNO", pd.Series.nunique))
+                    )
+
+                    total_fecha = (
+                        df_fechas.groupby("FECHA_ONLY", as_index=False)
+                        .agg(total_dia=("INTERNO", pd.Series.nunique))
+                    )
+
+                    share_fecha_linea = totales_fecha_linea.merge(total_fecha, on="FECHA_ONLY", how="left")
+                    share_fecha_linea["share_linea"] = np.where(
+                        share_fecha_linea["total_dia"] > 0,
+                        share_fecha_linea["total"] / share_fecha_linea["total_dia"],
+                        0
+                    )
+
+                    col_g1, col_g2 = st.columns(2)
+
+                    # =========================
+                    # OFERTA - Internos únicos
+                    # =========================
+                    chart_totales_plot = totales_fecha_linea.copy()
+                    chart_totales_plot["FECHA_ONLY"] = pd.to_datetime(chart_totales_plot["FECHA_ONLY"])
+                    chart_totales_plot = chart_totales_plot.sort_values(["FECHA_ONLY", "NUM_LINEA"])
+
+                    chart_totales_plot["fecha_label"] = chart_totales_plot["FECHA_ONLY"].apply(
+                        lambda x: f"{x.strftime('%b')} {x.day}"
+                    )
+
+                    orden_fechas = (
+                        chart_totales_plot["fecha_label"]
+                        .drop_duplicates()
+                        .tolist()
+                    )
+
+                    with col_g1:
+                        st.markdown("**Internos únicos por fecha y línea**")
+
+                        plot_totales = chart_totales_plot.copy()
+                        plot_totales["fecha_label"] = pd.Categorical(
+                            plot_totales["fecha_label"],
+                            categories=orden_fechas,
+                            ordered=True
+                        )
+
+                        base_totales = (
+                            alt.Chart(plot_totales)
+                            .transform_stack(
+                                stack="total",
+                                as_=["y0", "y1"],
+                                groupby=["fecha_label"],
+                                sort=[alt.SortField("NUM_LINEA", order="ascending")]
+                            )
+                            .transform_calculate(
+                                y_center="(datum.y0 + datum.y1) / 2"
+                            )
+                        )
+
+                        bars_totales = base_totales.mark_bar().encode(
+                            x=alt.X("fecha_label:N", sort=orden_fechas, title="Fecha"),
+                            y=alt.Y("y0:Q", title="Internos únicos"),
+                            y2="y1:Q",
+                            color=alt.Color(
+                                "NUM_LINEA:N",
+                                title="Línea",
+                                legend=alt.Legend(orient="bottom")
+                            ),
+                            order=alt.Order("NUM_LINEA:N", sort="ascending")
+                        )
+
+                        text_totales = base_totales.mark_text(
+                            size=12,
+                            color="white",
+                            align="center",
+                            baseline="middle"
+                        ).encode(
+                            x=alt.X("fecha_label:N", sort=orden_fechas),
+                            y=alt.Y("y_center:Q"),
+                            text=alt.Text("total:Q", format=".0f")
+                        )
+
+                        graf_totales = (bars_totales + text_totales).properties(height=400)
+
+                        st.altair_chart(graf_totales, use_container_width=True)
+
+                    # =========================
+                    # OFERTA - Share
+                    # =========================
+                    chart_share_plot = share_fecha_linea.copy()
+                    chart_share_plot["FECHA_ONLY"] = pd.to_datetime(chart_share_plot["FECHA_ONLY"])
+                    chart_share_plot["share_linea"] = (chart_share_plot["share_linea"] * 100).round(2)
+                    chart_share_plot = chart_share_plot.sort_values(["FECHA_ONLY", "NUM_LINEA"])
+
+                    chart_share_plot["fecha_label"] = chart_share_plot["FECHA_ONLY"].apply(
+                        lambda x: f"{x.strftime('%b')} {x.day}"
+                    )
+
+                    orden_fechas_share = (
+                        chart_share_plot["fecha_label"]
+                        .drop_duplicates()
+                        .tolist()
+                    )
+
+                    with col_g2:
+                        st.markdown("**Share por fecha y línea**")
+
+                        plot_share = chart_share_plot.copy()
+                        plot_share["fecha_label"] = pd.Categorical(
+                            plot_share["fecha_label"],
+                            categories=orden_fechas_share,
+                            ordered=True
+                        )
+
+                        base_share = (
+                            alt.Chart(plot_share)
+                            .transform_stack(
+                                stack="share_linea",
+                                as_=["y0", "y1"],
+                                groupby=["fecha_label"],
+                                sort=[alt.SortField("NUM_LINEA", order="ascending")]
+                            )
+                            .transform_calculate(
+                                y_center="(datum.y0 + datum.y1) / 2"
+                            )
+                        )
+
+                        bars_share = base_share.mark_bar().encode(
+                            x=alt.X("fecha_label:N", sort=orden_fechas_share, title="Fecha"),
+                            y=alt.Y("y0:Q", title="Share (%)"),
+                            y2="y1:Q",
+                            color=alt.Color(
+                                "NUM_LINEA:N",
+                                title="Línea",
+                                legend=alt.Legend(orient="bottom")
+                            ),
+                            order=alt.Order("NUM_LINEA:N", sort="ascending")
+                        )
+
+                        text_share = base_share.mark_text(
+                            size=12,
+                            color="white",
+                            align="center",
+                            baseline="middle"
+                        ).encode(
+                            x=alt.X("fecha_label:N", sort=orden_fechas_share),
+                            y=alt.Y("y_center:Q"),
+                            text=alt.Text("share_linea:Q", format=".1f")
+                        )
+
+                        graf_share = (bars_share + text_share).properties(height=400)
+
+                        st.altair_chart(graf_share, use_container_width=True)
+
+                    with st.expander("Ver tabla de totales y shares por fecha", expanded=False):
+                        tabla_comp = share_fecha_linea.copy()
+                        tabla_comp["FECHA_ONLY"] = pd.to_datetime(tabla_comp["FECHA_ONLY"])
+                        tabla_comp["share_linea"] = (tabla_comp["share_linea"] * 100).round(2)
+                        tabla_comp = tabla_comp.sort_values(["FECHA_ONLY", "NUM_LINEA"])
+                        st.dataframe(tabla_comp, use_container_width=True)
+
+        elif metric_mode == "Pasajeros por coche":
+            df_ppc = df_f[df_f["NUM_LINEA"].isin(selected_lines)].copy()
+
+            if df_ppc.empty:
+                st.info("No hay datos para la evolución horaria total.")
+            else:
+                demanda_hora = (
+                    df_ppc.groupby(["HORA", "NUM_LINEA"], as_index=False)
+                    .agg(trx=("CANT_TRAX", "sum"))
+                )
+
+                oferta_hora = (
+                    df_ppc.groupby(["HORA", "NUM_LINEA"], as_index=False)
+                    .agg(internos=("INTERNO", pd.Series.nunique))
+                )
+
+                ppc_hora = demanda_hora.merge(
+                    oferta_hora,
+                    on=["HORA", "NUM_LINEA"],
+                    how="outer"
+                ).fillna(0)
+
+                ppc_hora["pasajeros_por_coche"] = np.where(
+                    ppc_hora["internos"] > 0,
+                    ppc_hora["trx"] / ppc_hora["internos"],
+                    np.nan
+                )
+
+                chart_total = (
+                    ppc_hora
+                    .pivot(index="HORA", columns="NUM_LINEA", values="pasajeros_por_coche")
+                    .fillna(0)
+                )
+
+                st.line_chart(chart_total, use_container_width=True)
+
+                demanda_mi_linea = float(df_f[df_f["NUM_LINEA"] == my_line]["CANT_TRAX"].sum())
+                oferta_mi_linea = float(df_f[df_f["NUM_LINEA"] == my_line]["INTERNO"].nunique())
+                ppc_mi_linea = demanda_mi_linea / oferta_mi_linea if oferta_mi_linea > 0 else np.nan
+
+                demanda_total_filtro = float(df_f["CANT_TRAX"].sum())
+                oferta_total_filtro = float(df_f["INTERNO"].nunique())
+                ppc_total_filtro = (
+                    demanda_total_filtro / oferta_total_filtro
+                    if oferta_total_filtro > 0 else np.nan
+                )
+
+                indice_relativo_ppc = (
+                    ppc_mi_linea / ppc_total_filtro
+                    if pd.notna(ppc_mi_linea) and pd.notna(ppc_total_filtro) and ppc_total_filtro > 0
+                    else np.nan
+                )
+
+                k1, k2, k3 = st.columns(3)
+
+                k1.metric(
+                    f"Pasajeros/coche línea {my_line}",
+                    f"{ppc_mi_linea:.2f}" if pd.notna(ppc_mi_linea) else "N/A"
+                )
+
+                k2.metric(
+                    "Pasajeros/coche total del filtro",
+                    f"{ppc_total_filtro:.2f}" if pd.notna(ppc_total_filtro) else "N/A"
+                )
+
+                k3.metric(
+                    f"Índice relativo línea {my_line}",
+                    f"{indice_relativo_ppc:.2f}" if pd.notna(indice_relativo_ppc) else "N/A"
+                )
+
+                st.subheader("Comparación por fecha: totales y share por línea")
+
+                df_fechas = df[df["NUM_LINEA"].isin(selected_lines)].copy()
+
+                if df_fechas.empty:
+                    st.info("No hay datos para construir la comparación por fechas.")
+                else:
+                    demanda_fecha_linea = (
+                        df_fechas.groupby(["FECHA_ONLY", "NUM_LINEA"], as_index=False)
+                        .agg(demanda=("CANT_TRAX", "sum"))
+                    )
+
+                    oferta_fecha_linea = (
+                        df_fechas.groupby(["FECHA_ONLY", "NUM_LINEA"], as_index=False)
+                        .agg(oferta=("INTERNO", pd.Series.nunique))
+                    )
+
+                    totales_fecha_linea = demanda_fecha_linea.merge(
+                        oferta_fecha_linea,
+                        on=["FECHA_ONLY", "NUM_LINEA"],
+                        how="outer"
+                    ).fillna(0)
+
+                    totales_fecha_linea["total"] = np.where(
+                        totales_fecha_linea["oferta"] > 0,
+                        totales_fecha_linea["demanda"] / totales_fecha_linea["oferta"],
+                        np.nan
+                    )
+
+                    total_fecha = (
+                        totales_fecha_linea.groupby("FECHA_ONLY", as_index=False)
+                        .agg(total_dia=("total", "sum"))
+                    )
+
+                    share_fecha_linea = totales_fecha_linea.merge(
+                        total_fecha,
+                        on="FECHA_ONLY",
+                        how="left"
+                    )
+
+                    share_fecha_linea["share_linea"] = np.where(
+                        share_fecha_linea["total_dia"] > 0,
+                        share_fecha_linea["total"] / share_fecha_linea["total_dia"],
+                        0
+                    )
+
+                    col_g1, col_g2 = st.columns(2)
+
+                    # =========================
+                    # PASAJEROS POR COCHE - Totales
+                    # =========================
+                    chart_totales_plot = totales_fecha_linea.copy()
+                    chart_totales_plot["FECHA_ONLY"] = pd.to_datetime(chart_totales_plot["FECHA_ONLY"])
+                    chart_totales_plot = chart_totales_plot.sort_values(["FECHA_ONLY", "NUM_LINEA"])
+
+                    chart_totales_plot["fecha_label"] = chart_totales_plot["FECHA_ONLY"].apply(
+                        lambda x: f"{x.strftime('%b')} {x.day}"
+                    )
+
+                    orden_fechas = (
+                        chart_totales_plot["fecha_label"]
+                        .drop_duplicates()
+                        .tolist()
+                    )
+
+                    with col_g1:
+                        st.markdown("**Pasajeros por coche por fecha y línea**")
+
+                        plot_totales = chart_totales_plot.copy()
+                        plot_totales["fecha_label"] = pd.Categorical(
+                            plot_totales["fecha_label"],
+                            categories=orden_fechas,
+                            ordered=True
+                        )
+
+                        base_totales = (
+                            alt.Chart(plot_totales)
+                            .transform_stack(
+                                stack="total",
+                                as_=["y0", "y1"],
+                                groupby=["fecha_label"],
+                                sort=[alt.SortField("NUM_LINEA", order="ascending")]
+                            )
+                            .transform_calculate(
+                                y_center="(datum.y0 + datum.y1) / 2"
+                            )
+                        )
+
+                        bars_totales = base_totales.mark_bar().encode(
+                            x=alt.X("fecha_label:N", sort=orden_fechas, title="Fecha"),
+                            y=alt.Y("y0:Q", title="Pasajeros por coche"),
+                            y2="y1:Q",
+                            color=alt.Color(
+                                "NUM_LINEA:N",
+                                title="Línea",
+                                legend=alt.Legend(orient="bottom")
+                            ),
+                            order=alt.Order("NUM_LINEA:N", sort="ascending")
+                        )
+
+                        text_totales = base_totales.mark_text(
+                            size=12,
+                            color="white",
+                            align="center",
+                            baseline="middle"
+                        ).encode(
+                            x=alt.X("fecha_label:N", sort=orden_fechas),
+                            y=alt.Y("y_center:Q"),
+                            text=alt.Text("total:Q", format=".1f")
+                        )
+
+                        graf_totales = (bars_totales + text_totales).properties(height=400)
+
+                        st.altair_chart(graf_totales, use_container_width=True)
+
+                    # =========================
+                    # PASAJEROS POR COCHE - Share
+                    # =========================
+                    chart_share_plot = share_fecha_linea.copy()
+                    chart_share_plot["FECHA_ONLY"] = pd.to_datetime(chart_share_plot["FECHA_ONLY"])
+                    chart_share_plot["share_linea"] = (chart_share_plot["share_linea"] * 100).round(2)
+                    chart_share_plot = chart_share_plot.sort_values(["FECHA_ONLY", "NUM_LINEA"])
+
+                    chart_share_plot["fecha_label"] = chart_share_plot["FECHA_ONLY"].apply(
+                        lambda x: f"{x.strftime('%b')} {x.day}"
+                    )
+
+                    orden_fechas_share = (
+                        chart_share_plot["fecha_label"]
+                        .drop_duplicates()
+                        .tolist()
+                    )
+
+                    with col_g2:
+                        st.markdown("**Share de pasajeros por coche por fecha y línea**")
+
+                        plot_share = chart_share_plot.copy()
+                        plot_share["fecha_label"] = pd.Categorical(
+                            plot_share["fecha_label"],
+                            categories=orden_fechas_share,
+                            ordered=True
+                        )
+
+                        base_share = (
+                            alt.Chart(plot_share)
+                            .transform_stack(
+                                stack="share_linea",
+                                as_=["y0", "y1"],
+                                groupby=["fecha_label"],
+                                sort=[alt.SortField("NUM_LINEA", order="ascending")]
+                            )
+                            .transform_calculate(
+                                y_center="(datum.y0 + datum.y1) / 2"
+                            )
+                        )
+
+                        bars_share = base_share.mark_bar().encode(
+                            x=alt.X("fecha_label:N", sort=orden_fechas_share, title="Fecha"),
+                            y=alt.Y("y0:Q", title="Share (%)"),
+                            y2="y1:Q",
+                            color=alt.Color(
+                                "NUM_LINEA:N",
+                                title="Línea",
+                                legend=alt.Legend(orient="bottom")
+                            ),
+                            order=alt.Order("NUM_LINEA:N", sort="ascending")
+                        )
+
+                        text_share = base_share.mark_text(
+                            size=12,
+                            color="white",
+                            align="center",
+                            baseline="middle"
+                        ).encode(
+                            x=alt.X("fecha_label:N", sort=orden_fechas_share),
+                            y=alt.Y("y_center:Q"),
+                            text=alt.Text("share_linea:Q", format=".1f")
+                        )
+
+                        graf_share = (bars_share + text_share).properties(height=400)
+
+                        st.altair_chart(graf_share, use_container_width=True)
+
+                    with st.expander("Ver tabla de pasajeros por coche y shares por fecha", expanded=False):
+                        tabla_comp = share_fecha_linea.copy()
+                        tabla_comp["FECHA_ONLY"] = pd.to_datetime(tabla_comp["FECHA_ONLY"])
+                        tabla_comp["share_linea"] = (tabla_comp["share_linea"] * 100).round(2)
+                        tabla_comp["total"] = tabla_comp["total"].round(2)
+                        tabla_comp = tabla_comp.sort_values(["FECHA_ONLY", "NUM_LINEA"])
+                        st.dataframe(tabla_comp, use_container_width=True)
+
     download_bytes = to_download_excel(display_df, comp_hex)
     st.download_button(
         "Descargar resultados en Excel",
         data=download_bytes,
-        file_name=f"competencia_lineas_h3_{selected_date}.xlsx",
+        file_name=f"competencia_lineas_{selected_date}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+# =========================
+# SOLAPA 2: RECORRIDO
+# =========================
+
+with tab_recorrido:
+    st.subheader("Reconstrucción de recorrido por colectivo")
+
+    if df.empty:
+        st.info("No hay datos disponibles.")
+    else:
+        df_rec = df.copy()
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            fechas_rec = sorted(df_rec["FECHA_ONLY"].dropna().unique())
+            selected_date_rec = st.selectbox("Fecha", fechas_rec, key="rec_fecha")
+
+        df_rec = df_rec[df_rec["FECHA_ONLY"] == selected_date_rec].copy()
+
+        with col2:
+            lineas_rec = sorted(df_rec["NUM_LINEA"].dropna().astype(int).unique().tolist())
+            selected_line_rec = st.selectbox("Línea", lineas_rec, key="rec_linea")
+
+        df_rec = df_rec[df_rec["NUM_LINEA"] == selected_line_rec].copy()
+
+        with col3:
+            sentidos_rec = sorted(df_rec["SENTIDO"].dropna().unique().tolist())
+            selected_sentido_rec = st.selectbox("Sentido", sentidos_rec, key="rec_sentido")
+
+        df_rec = df_rec[df_rec["SENTIDO"] == selected_sentido_rec].copy()
+
+        with col4:
+            internos_rec = sorted(df_rec["INTERNO"].astype(str).str.strip().unique().tolist())
+            selected_interno_rec = st.selectbox("Interno", internos_rec, key="rec_interno")
+
+        trace_df = build_vehicle_trace(
+            df_filtered=df,
+            linea=selected_line_rec,
+            interno=selected_interno_rec,
+            sentido=selected_sentido_rec,
+        )
+
+        if trace_df.empty:
+            st.warning("No hay registros para la combinación seleccionada.")
+        else:
+            st.write(f"Registros del recorrido: {len(trace_df):,}".replace(",", "."))
+            vehicle_hourly_df = build_vehicle_hourly(trace_df)
+
+            max_step = len(trace_df) - 1
+
+            step_idx = st.slider(
+                "Avance temporal del recorrido",
+                min_value=0,
+                max_value=max_step,
+                value=0,
+                step=1,
+                key="rec_step"
+            )
+
+            current_dt = trace_df.iloc[step_idx]["DATE_TIME"]
+            st.markdown(f"**DATE_TIME actual:** {current_dt.strftime('%d/%m/%Y %H:%M:%S')}")
+
+            vehicle_points_df = build_vehicle_points_animation_df(trace_df, step_idx)
+            current_position_df = build_current_position_df(trace_df, step_idx)
+
+            layers_rec = []
+
+            if routes_gdf is not None:
+                routes_ref_df = build_routes_layer_df(
+                    routes_gdf=routes_gdf,
+                    selected_line=selected_line_rec,
+                    selected_sentido=selected_sentido_rec,
+                )
+
+                if not routes_ref_df.empty:
+                    route_ref_layer = pdk.Layer(
+                        "PathLayer",
+                        data=routes_ref_df,
+                        get_path="path",
+                        get_color="color",
+                        width_scale=1,
+                        width_min_pixels=3,
+                        pickable=True,
+                    )
+                    layers_rec.append(route_ref_layer)
+
+            history_layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=vehicle_points_df,
+                get_position="[LONGITUDE, LATITUDE]",
+                get_radius=20,
+                get_fill_color=[220, 30, 30, 90],
+                get_line_color=[120, 0, 0, 120],
+                line_width_min_pixels=1,
+                stroked=True,
+                filled=True,
+                pickable=True,
+            )
+
+            current_layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=current_position_df,
+                get_position="[LONGITUDE, LATITUDE]",
+                get_radius=60,
+                get_fill_color=[0, 102, 255, 180],
+                get_line_color=[0, 51, 153, 220],
+                line_width_min_pixels=2,
+                stroked=True,
+                filled=True,
+                pickable=True,
+            )
+
+            layers_rec.append(history_layer)
+            layers_rec.append(current_layer)
+
+            view_state_rec = pdk.ViewState(
+                latitude=float(current_position_df["LATITUDE"].iloc[0]),
+                longitude=float(current_position_df["LONGITUDE"].iloc[0]),
+                zoom=12,
+                pitch=0,
+            )
+
+            deck_rec = pdk.Deck(
+                layers=layers_rec,
+                initial_view_state=view_state_rec,
+                tooltip={"text": "{tooltip}"},
+                map_style="light",
+            )
+
+            st.pydeck_chart(deck_rec, use_container_width=True)
+
+            st.markdown(
+                f"""
+                **Línea:** {selected_line_rec}  
+                **Interno:** {selected_interno_rec}  
+                **Sentido:** {selected_sentido_rec}
+                """
+            )
+
+            col_a, col_b = st.columns([1, 1])
+
+            with col_a:
+                st.markdown("**Tabla de registros ordenados por DATE_TIME**")
+                show_trace = trace_df[
+                    ["DATE_TIME", "NUM_LINEA", "SENTIDO", "INTERNO", "LONGITUDE", "LATITUDE", "CANT_TRAX"]
+                ].copy()
+                st.dataframe(show_trace, use_container_width=True, height=420)
+
+            with col_b:
+                st.markdown("**Evolución horaria del interno**")
+                if vehicle_hourly_df.empty:
+                    st.info("No hay datos horarios.")
+                else:
+                    chart_vehicle = vehicle_hourly_df.set_index("HORA")[["trx"]]
+                    st.line_chart(chart_vehicle, use_container_width=True)
+
+            buffer_rec = io.BytesIO()
+            with pd.ExcelWriter(buffer_rec, engine="openpyxl") as writer:
+                trace_df.to_excel(writer, sheet_name="Recorrido_interno", index=False)
+                vehicle_hourly_df.to_excel(writer, sheet_name="Resumen_horario", index=False)
+            buffer_rec.seek(0)
+
+            st.download_button(
+                "Descargar recorrido del interno en Excel",
+                data=buffer_rec.read(),
+                file_name=f"recorrido_linea_{selected_line_rec}_interno_{selected_interno_rec}_{selected_date_rec}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_recorrido"
+            )
+
+# =========================
+# Notas metodológicas
+# =========================
+
+with st.expander("Criterio metodológico usado", expanded=False):
+    st.markdown(
+        """
+- La **demanda** se mide con `CANT_TRAX`.
+- La **oferta observada** se aproxima con `INTERNO` únicos por hexágono.
+- Un **punto de control** es un hexágono donde:
+  - está tu línea,
+  - hay al menos otra línea,
+  - y supera un umbral mínimo de transacciones.
+- El **índice de captación** se calcula como:
+
+  `share_demanda / share_oferta`
+
+  Interpretación:
+  - mayor a 1: la línea capta más demanda que la oferta que pone
+  - menor a 1: pone más oferta de la que capta
+        """
+    )
+
+# =========================
+# SOLAPA 3: FRECUENCIA
+# =========================
+
+with tab_frecuencia:
+    st.subheader("Frecuencia observada por línea")
+
+    if df_f.empty:
+        st.warning("No hay datos con los filtros elegidos.")
+        st.stop()
+
+    with st.spinner("Calculando frecuencia observada..."):
+        df_hex = assign_points_to_hexes(df_f, h3_res)
+
+        freq_df = compute_headways(
+            df_hex=df_hex,
+            selected_lines=selected_lines
+        )
+
+    if freq_df.empty:
+        st.info("No hay suficientes observaciones para calcular frecuencia.")
+    else:
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric(
+            "Líneas analizadas",
+            freq_df["linea"].nunique()
+        )
+
+        col2.metric(
+            "Hexágonos con pasos observados",
+            freq_df["hex_id"].nunique()
+        )
+
+        col3.metric(
+            "Headway mediano general",
+            f"{freq_df['headway_median'].median():.1f} min"
+        )
+
+        st.subheader("Frecuencia por línea")
+
+        freq_line = (
+            freq_df.groupby(["linea", "sentido"])
+            .agg(
+                headway_median=("headway_median", "median"),
+                headway_mean=("headway_mean", "mean"),
+                pasos=("pasos_observados", "sum")
+            )
+            .reset_index()
+        )
+
+        st.dataframe(freq_line, use_container_width=True)
+
+        st.subheader("Distribución de headways")
+
+        chart_df = freq_df.copy()
+        chart_df["linea_sentido"] = chart_df["linea"].astype(str) + "_" + chart_df["sentido"]
+
+        chart = chart_df.pivot(
+            columns="linea_sentido",
+            values="headway_median"
+        )
+
+        st.line_chart(chart)
+
+        st.subheader("Tabla completa por hexágono")
+        st.dataframe(freq_df, use_container_width=True)
+
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            freq_line.to_excel(writer, sheet_name="Frecuencia_linea", index=False)
+            freq_df.to_excel(writer, sheet_name="Frecuencia_hexagonos", index=False)
+
+        buffer.seek(0)
+
+        st.download_button(
+            "Descargar frecuencia en Excel",
+            data=buffer.read(),
+            file_name="frecuencia_observada.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
