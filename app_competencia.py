@@ -8,6 +8,8 @@ import pandas as pd
 import geopandas as gpd
 import streamlit as st
 import pydeck as pdk
+import folium
+from streamlit_folium import folium_static
 
 try:
     import h3
@@ -113,13 +115,54 @@ def build_routes_layer_df(
     selected_line: int,
     selected_sentido: str,
 ) -> pd.DataFrame:
-    gdf = routes_gdf[routes_gdf["linea_norm"] == int(selected_line)].copy()
+    return build_routes_layers_multi_df(
+        routes_gdf=routes_gdf,
+        selected_lines=[selected_line],
+        selected_sentido=selected_sentido,
+        highlight_line=selected_line,
+    )
+
+
+def build_routes_layers_multi_df(
+    routes_gdf: gpd.GeoDataFrame,
+    selected_lines: list[int],
+    selected_sentido: str,
+    highlight_line: Optional[int] = None,
+) -> pd.DataFrame:
+    selected_lines = [int(x) for x in selected_lines if pd.notna(x)]
+    if len(selected_lines) == 0:
+        return pd.DataFrame(columns=["linea_norm", "sentido_norm", "path", "color", "tooltip", "width_pixels"])
+
+    gdf = routes_gdf[routes_gdf["linea_norm"].isin(selected_lines)].copy()
 
     if selected_sentido != "TODOS":
         gdf = gdf[gdf["sentido_norm"] == selected_sentido].copy()
 
     if gdf.empty:
-        return pd.DataFrame(columns=["linea_norm", "sentido_norm", "path", "color", "tooltip"])
+        return pd.DataFrame(columns=["linea_norm", "sentido_norm", "path", "color", "tooltip", "width_pixels"])
+
+    palette = [
+        [230, 25, 75],
+        [60, 180, 75],
+        [255, 225, 25],
+        [0, 130, 200],
+        [245, 130, 48],
+        [145, 30, 180],
+        [70, 240, 240],
+        [240, 50, 230],
+        [210, 245, 60],
+        [250, 190, 190],
+        [0, 128, 128],
+        [230, 190, 255],
+    ]
+
+    line_colors = {}
+    for i, line in enumerate(selected_lines):
+        base = palette[i % len(palette)].copy()
+        if highlight_line is not None and int(line) == int(highlight_line):
+            line_colors[int(line)] = [60, 120, 255]
+        else:
+            line_colors[int(line)] = base
 
     rows = []
 
@@ -135,16 +178,21 @@ def build_routes_layer_df(
 
         for path in flat_paths:
             if len(path) >= 2:
+                linea = int(row["linea_norm"])
                 sentido = row["sentido_norm"]
-                color = [60, 120, 255] if sentido == "IDA" else [255, 140, 50]
+                color_base = line_colors.get(linea, [120, 120, 120])
+                alpha = 220 if highlight_line is not None and linea == int(highlight_line) else 180
+                color = color_base + [alpha]
+                width_pixels = 5 if highlight_line is not None and linea == int(highlight_line) else 3
 
                 rows.append(
                     {
-                        "linea_norm": row["linea_norm"],
+                        "linea_norm": linea,
                         "sentido_norm": sentido,
                         "path": path,
                         "color": color,
-                        "tooltip": f"Línea {row['linea_norm']} - {sentido}",
+                        "width_pixels": width_pixels,
+                        "tooltip": f"Línea {linea} - {sentido}",
                     }
                 )
 
@@ -556,6 +604,87 @@ def color_by_share_demanda(p):
     else:
         return [8, 81, 156, 210]      # azul intenso
 
+
+def rgba_to_css(color):
+    if color is None or len(color) < 3:
+        return "#808080"
+    r, g, b = color[:3]
+    a = color[3] / 255 if len(color) > 3 else 1
+    return f"rgba({int(r)}, {int(g)}, {int(b)}, {a:.3f})"
+
+
+def create_competencia_folium_map(
+    map_df: pd.DataFrame,
+    routes_df: Optional[pd.DataFrame] = None,
+    show_trx_circles: bool = False,
+):
+    if map_df.empty:
+        return folium.Map(location=[-34.60, -58.38], zoom_start=10, tiles="CartoDB positron")
+
+    center_lat = float(map_df["lat"].mean())
+    center_lon = float(map_df["lon"].mean())
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=10, tiles="CartoDB positron")
+
+    fg_hex = folium.FeatureGroup(name="Hexágonos", show=True)
+    for _, row in map_df.iterrows():
+        tooltip = folium.Tooltip(row.get("tooltip", ""))
+        folium.Polygon(
+            locations=[(lat, lon) for lon, lat in row["polygon"][0]],
+            color="#5a5a5a",
+            weight=1,
+            fill=True,
+            fill_color=rgba_to_css(row.get("fill_color", [160, 160, 160, 120])),
+            fill_opacity=0.55,
+            tooltip=tooltip,
+        ).add_to(fg_hex)
+
+        label = row.get("label_pct")
+        if pd.isna(label) or label is None or str(label).strip() == "":
+            label = row.get("label_share_demanda", "")
+        if str(label).strip() != "":
+            html = f'<div style="font-size:10pt;color:#333;font-weight:600;text-align:center;white-space:nowrap;">{label}</div>'
+            folium.Marker(
+                location=[row["lat"], row["lon"]],
+                icon=folium.DivIcon(html=html),
+            ).add_to(fg_hex)
+
+    fg_hex.add_to(m)
+
+    if show_trx_circles:
+        fg_circles = folium.FeatureGroup(name="Círculos trx", show=True)
+        for _, row in map_df.iterrows():
+            radius = float(row.get("circle_radius", 0)) / 2
+            if radius <= 0:
+                continue
+            folium.Circle(
+                location=[row["lat"], row["lon"]],
+                radius=radius,
+                color="#145aa0",
+                weight=1,
+                fill=True,
+                fill_color="#1e90ff",
+                fill_opacity=0.20,
+                tooltip=row.get("tooltip", ""),
+            ).add_to(fg_circles)
+        fg_circles.add_to(m)
+
+    if routes_df is not None and not routes_df.empty:
+        for linea in sorted(routes_df["linea_norm"].dropna().astype(int).unique().tolist()):
+            line_df = routes_df[routes_df["linea_norm"] == linea].copy()
+            fg_line = folium.FeatureGroup(name=f"Línea {linea}", show=True)
+            for _, row in line_df.iterrows():
+                folium.PolyLine(
+                    locations=[(lat, lon) for lon, lat in row["path"]],
+                    color=rgba_to_css(row.get("color", [120, 120, 120, 200])),
+                    weight=float(row.get("width_pixels", 3)),
+                    opacity=0.95,
+                    tooltip=row.get("tooltip", f"Línea {linea}"),
+                ).add_to(fg_line)
+            fg_line.add_to(m)
+
+    folium.LayerControl(collapsed=False).add_to(m)
+    return m
+
 # =========================
 # UI
 # =========================
@@ -717,6 +846,18 @@ with tab_competencia:
         value=False
     )
 
+    show_compare_routes = st.sidebar.checkbox(
+        "Mostrar recorridos de líneas a comparar",
+        value=False,
+        help="Dibuja en el mapa los recorridos de todas las líneas seleccionadas en 'Líneas a comparar'."
+    )
+
+    use_map_layer_filter = st.sidebar.checkbox(
+        "Filtrar líneas dentro del mapa",
+        value=False,
+        help="Usa un mapa Folium con control de capas para prender y apagar líneas dentro del propio mapa."
+    )
+
     map_mode = st.sidebar.selectbox(
         "Modo de visualización del mapa",
         options=[
@@ -775,6 +916,8 @@ with tab_competencia:
                 ].copy()
 
         trx_total_filtro = map_points_control["trx_total_hex"].sum() if not map_points_control.empty else 0
+
+        st.write(trx_total_filtro)
 
         if trx_total_filtro > 0:
             map_points_control["pct_trx_hex"] = map_points_control["trx_total_hex"] / trx_total_filtro
@@ -890,10 +1033,13 @@ with tab_competencia:
         routes_layer = None
 
         if routes_gdf is not None:
-            routes_df = build_routes_layer_df(
+            route_lines_to_draw = selected_lines if show_compare_routes else [my_line]
+
+            routes_df = build_routes_layers_multi_df(
                 routes_gdf=routes_gdf,
-                selected_line=my_line,
+                selected_lines=route_lines_to_draw,
                 selected_sentido=selected_sentido,
+                highlight_line=my_line,
             )
 
             if not routes_df.empty:
@@ -902,8 +1048,10 @@ with tab_competencia:
                     data=routes_df,
                     get_path="path",
                     get_color="color",
-                    width_scale=1,
-                    width_min_pixels=4,
+                    get_width="width_pixels",
+                    width_scale=2,
+                    width_min_pixels=2,
+                    width_max_pixels=10,
                     pickable=True,
                     auto_highlight=True,
                 )
@@ -935,14 +1083,26 @@ with tab_competencia:
         if text_layer is not None:
             layers.append(text_layer)
 
-        deck = pdk.Deck(
-            layers=layers,
-            initial_view_state=view_state,
-            tooltip={"text": "{tooltip}"},
-            map_style="light",
-        )
+        if show_compare_routes and use_map_layer_filter and routes_layer is not None and routes_gdf is not None:
+            folium_map = create_competencia_folium_map(
+                map_df=map_df,
+                routes_df=routes_df if 'routes_df' in locals() else None,
+                show_trx_circles=show_trx_circles,
+            )
+            folium_static(folium_map, width=1200, height=650)
+            st.caption("Dentro del mapa podés prender y apagar cada línea desde el control de capas de la esquina superior derecha.")
+        else:
+            deck = pdk.Deck(
+                layers=layers,
+                initial_view_state=view_state,
+                tooltip={"text": "{tooltip}"},
+                map_style="light",
+            )
 
-        st.pydeck_chart(deck, use_container_width=True)
+            st.pydeck_chart(deck, use_container_width=True)
+
+        if show_compare_routes and routes_gdf is not None:
+            st.caption("Las líneas comparadas se dibujan sobre el mapa; tu línea queda destacada con mayor grosor.")
 
         if map_mode == "Mapa de calor por pct_trx_hex":
             st.markdown(
@@ -974,6 +1134,9 @@ with tab_competencia:
 
         if show_trx_circles:
             st.markdown("🔵 El tamaño del círculo representa las transacciones totales del hexágono.")
+
+        if show_compare_routes and routes_gdf is not None:
+            st.markdown("🛣️ Se muestran los recorridos de las líneas seleccionadas en **Líneas a comparar**. La línea propia queda destacada con mayor grosor.")
 
     st.subheader("Ranking de puntos de control")
 
@@ -1041,6 +1204,39 @@ with tab_competencia:
                 chart_df = evol_hex.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
                 st.line_chart(chart_df, use_container_width=True)
 
+        analysis_scope = st.radio(
+            "Alcance de los gráficos",
+            ["Total filtrado", "Hexágono seleccionado"],
+            horizontal=True,
+            key="analysis_scope_totales"
+        )
+
+        if analysis_scope == "Hexágono seleccionado":
+            scope_label = f"hexágono {selected_hex}"
+            df_scope_current = df_hex[
+                (df_hex["hex_id"] == selected_hex)
+                & (df_hex["NUM_LINEA"].isin(selected_lines))
+            ].copy()
+
+            df_scope_dates = df[df["NUM_LINEA"].isin(selected_lines)].copy()
+            if selected_sentido != "TODOS":
+                df_scope_dates = df_scope_dates[df_scope_dates["SENTIDO"] == selected_sentido].copy()
+            df_scope_dates = filter_by_time_block(df_scope_dates, selected_block)
+            df_scope_dates = df_scope_dates[
+                (df_scope_dates["HORA"] >= selected_hours[0])
+                & (df_scope_dates["HORA"] <= selected_hours[1])
+            ].copy()
+
+            if not df_scope_dates.empty:
+                df_scope_dates = assign_points_to_hexes(df_scope_dates, h3_res)
+                df_scope_dates = df_scope_dates[df_scope_dates["hex_id"] == selected_hex].copy()
+        else:
+            scope_label = "filtro actual"
+            df_scope_current = df_f[df_f["NUM_LINEA"].isin(selected_lines)].copy()
+            df_scope_dates = df[df["NUM_LINEA"].isin(selected_lines)].copy()
+
+        evol_total_scope = build_hourly_evolution_total(df_scope_current, selected_lines)
+
         metric_mode = st.selectbox(
             "Métrica para visualizar",
             [
@@ -1053,17 +1249,18 @@ with tab_competencia:
         )
 
 
-        st.subheader("Evolución horaria total")
+        st.subheader("Evolución horaria del alcance seleccionado")
+        st.caption(f"Mostrando gráficos para: {scope_label}.")
 
         if metric_mode == "Demanda (transacciones)":
-            if evol_total.empty:
+            if evol_total_scope.empty:
                 st.info("No hay datos para la evolución horaria total.")
             else:
-                chart_total = evol_total.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
+                chart_total = evol_total_scope.pivot(index="HORA", columns="NUM_LINEA", values="trx").fillna(0)
                 st.line_chart(chart_total, use_container_width=True)
 
-                trx_mi_linea = int(df_f[df_f["NUM_LINEA"] == my_line]["CANT_TRAX"].sum())
-                trx_total_filtro = int(df_f["CANT_TRAX"].sum())
+                trx_mi_linea = int(df_scope_current[df_scope_current["NUM_LINEA"] == my_line]["CANT_TRAX"].sum())
+                trx_total_filtro = int(df_scope_current["CANT_TRAX"].sum())
 
                 share_mi_linea = (
                     trx_mi_linea / trx_total_filtro
@@ -1078,7 +1275,7 @@ with tab_competencia:
                 )
 
                 k2.metric(
-                    "Transacciones totales del filtro",
+                    "Transacciones totales del alcance",
                     f"{trx_total_filtro:,}".replace(",", ".")
                 )
 
@@ -1089,7 +1286,7 @@ with tab_competencia:
 
                 st.subheader("Comparación por fecha: totales y share por línea")
 
-                df_fechas = df[df["NUM_LINEA"].isin(selected_lines)].copy()
+                df_fechas = df_scope_dates.copy()
 
                 if df_fechas.empty:
                     st.info("No hay datos para construir la comparación por fechas.")
@@ -1257,7 +1454,7 @@ with tab_competencia:
 
         elif metric_mode == "Oferta (internos únicos)":
             evol_total_oferta = (
-                df_f[df_f["NUM_LINEA"].isin(selected_lines)]
+                df_scope_current
                 .groupby(["HORA", "NUM_LINEA"], as_index=False)
                 .agg(internos=("INTERNO", pd.Series.nunique))
                 .sort_values(["HORA", "NUM_LINEA"])
@@ -1269,8 +1466,8 @@ with tab_competencia:
                 chart_total = evol_total_oferta.pivot(index="HORA", columns="NUM_LINEA", values="internos").fillna(0)
                 st.line_chart(chart_total, use_container_width=True)
 
-                oferta_mi_linea = int(df_f[df_f["NUM_LINEA"] == my_line]["INTERNO"].nunique())
-                oferta_total_filtro = int(df_f["INTERNO"].nunique())
+                oferta_mi_linea = int(df_scope_current[df_scope_current["NUM_LINEA"] == my_line]["INTERNO"].nunique())
+                oferta_total_filtro = int(df_scope_current["INTERNO"].nunique())
 
                 share_mi_linea = (
                     oferta_mi_linea / oferta_total_filtro
@@ -1285,7 +1482,7 @@ with tab_competencia:
                 )
 
                 k2.metric(
-                    "Internos únicos totales del filtro",
+                    "Internos únicos totales del alcance",
                     f"{oferta_total_filtro:,}".replace(",", ".")
                 )
 
@@ -1296,7 +1493,7 @@ with tab_competencia:
 
                 st.subheader("Comparación por fecha: totales y share por línea")
 
-                df_fechas = df[df["NUM_LINEA"].isin(selected_lines)].copy()
+                df_fechas = df_scope_dates.copy()
 
                 if df_fechas.empty:
                     st.info("No hay datos para construir la comparación por fechas.")
@@ -1463,7 +1660,7 @@ with tab_competencia:
                         st.dataframe(tabla_comp, use_container_width=True)
 
         elif metric_mode == "Pasajeros por coche":
-            df_ppc = df_f[df_f["NUM_LINEA"].isin(selected_lines)].copy()
+            df_ppc = df_scope_current.copy()
 
             if df_ppc.empty:
                 st.info("No hay datos para la evolución horaria total.")
@@ -1498,12 +1695,12 @@ with tab_competencia:
 
                 st.line_chart(chart_total, use_container_width=True)
 
-                demanda_mi_linea = float(df_f[df_f["NUM_LINEA"] == my_line]["CANT_TRAX"].sum())
-                oferta_mi_linea = float(df_f[df_f["NUM_LINEA"] == my_line]["INTERNO"].nunique())
+                demanda_mi_linea = float(df_scope_current[df_scope_current["NUM_LINEA"] == my_line]["CANT_TRAX"].sum())
+                oferta_mi_linea = float(df_scope_current[df_scope_current["NUM_LINEA"] == my_line]["INTERNO"].nunique())
                 ppc_mi_linea = demanda_mi_linea / oferta_mi_linea if oferta_mi_linea > 0 else np.nan
 
-                demanda_total_filtro = float(df_f["CANT_TRAX"].sum())
-                oferta_total_filtro = float(df_f["INTERNO"].nunique())
+                demanda_total_filtro = float(df_scope_current["CANT_TRAX"].sum())
+                oferta_total_filtro = float(df_scope_current["INTERNO"].nunique())
                 ppc_total_filtro = (
                     demanda_total_filtro / oferta_total_filtro
                     if oferta_total_filtro > 0 else np.nan
@@ -1523,7 +1720,7 @@ with tab_competencia:
                 )
 
                 k2.metric(
-                    "Pasajeros/coche total del filtro",
+                    "Pasajeros/coche total del alcance",
                     f"{ppc_total_filtro:.2f}" if pd.notna(ppc_total_filtro) else "N/A"
                 )
 
@@ -1534,7 +1731,7 @@ with tab_competencia:
 
                 st.subheader("Comparación por fecha: totales y share por línea")
 
-                df_fechas = df[df["NUM_LINEA"].isin(selected_lines)].copy()
+                df_fechas = df_scope_dates.copy()
 
                 if df_fechas.empty:
                     st.info("No hay datos para construir la comparación por fechas.")
@@ -1722,7 +1919,6 @@ with tab_competencia:
                         tabla_comp["total"] = tabla_comp["total"].round(2)
                         tabla_comp = tabla_comp.sort_values(["FECHA_ONLY", "NUM_LINEA"])
                         st.dataframe(tabla_comp, use_container_width=True)
-
     download_bytes = to_download_excel(display_df, comp_hex)
     st.download_button(
         "Descargar resultados en Excel",
