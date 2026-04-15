@@ -7,3 +7,4 @@ pydeck
 pyogrio
 pyproj
 h3
+folium
